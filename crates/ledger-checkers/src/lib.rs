@@ -229,7 +229,7 @@ pub struct SignatureChecker;
 
 impl Checker<'_> for SignatureChecker {
     const ID: &'static str = "request_signature";
-    const VERSION: u32 = 1;
+    const VERSION: u32 = 2;
     type Claim = RequestSignature;
     type Evidence = CapturedRequest;
 
@@ -242,16 +242,25 @@ impl Checker<'_> for SignatureChecker {
         let key =
             hex::decode(&claim.key_hex).map_err(|e| CheckError::InvalidClaim(e.to_string()))?;
         Ok(replay(evidence, deadline, |req| {
-            let got = req
-                .headers
-                .get(&claim.header)
+            // Header names are case-insensitive in HTTP, and HTTP/2 captures have them in lower case.
+            let (_, got) = (req.headers.iter())
+                .find(|(name, _)| name.eq_ignore_ascii_case(&claim.header))
                 .ok_or_else(|| format!("header `{}` missing", claim.header))?;
             let mac = sign(claim.algorithm, &key, req.body.as_bytes())?;
-            let want = match claim.encoding {
-                SigEncoding::Hex => hex::encode(mac),
-                SigEncoding::Base64 => base64::engine::general_purpose::STANDARD.encode(mac),
+            // Hex digits may be in either case; in base64 case is part of the value.
+            let (want, same) = match claim.encoding {
+                SigEncoding::Hex => {
+                    let want = hex::encode(mac);
+                    let same = got.eq_ignore_ascii_case(&want);
+                    (want, same)
+                }
+                SigEncoding::Base64 => {
+                    let want = base64::engine::general_purpose::STANDARD.encode(mac);
+                    let same = *got == want;
+                    (want, same)
+                }
             };
-            if got.eq_ignore_ascii_case(&want) {
+            if same {
                 Ok(())
             } else {
                 Err(format!("header has {got}, recomputed {want}"))
@@ -396,6 +405,38 @@ mod tests {
 
     fn soon() -> Instant {
         Instant::now() + Duration::from_secs(5)
+    }
+
+    /// Both were seen in trial 2: a true claim refuted by lower-case header names, and
+    /// a damaged base64 signature accepted.
+    #[test]
+    fn header_names_ignore_case_and_base64_does_not() -> Result<(), CheckError> {
+        let claim = RequestSignature {
+            endpoint: "/purchase".into(),
+            header: "X-Sig".into(),
+            algorithm: SigAlgorithm::HmacSha1,
+            encoding: SigEncoding::Base64,
+            key_hex: "00ff10".into(),
+        };
+        let mac = sign(claim.algorithm, &[0x00, 0xff, 0x10], b"item=1")
+            .map_err(CheckError::InvalidClaim)?;
+        let good = base64::engine::general_purpose::STANDARD.encode(mac);
+        assert_ne!(
+            good,
+            good.to_lowercase(),
+            "the test needs a signature with capitals"
+        );
+        let request = |header: &str, value: &str| CapturedRequest {
+            headers: BTreeMap::from([(header.into(), value.into())]),
+            body: "item=1".into(),
+        };
+        let held = |request| -> Result<bool, CheckError> {
+            let verdict = SignatureChecker.check(&claim, &[item(b"r", request)], soon())?;
+            Ok(matches!(verdict, Verdict::Held { .. }))
+        };
+        assert!(held(request("x-sig", &good))?);
+        assert!(!held(request("X-Sig", &good.to_lowercase()))?);
+        Ok(())
     }
 
     fn signed(claim: &RequestSignature, body: &str) -> Result<Vec<u8>, CheckError> {
