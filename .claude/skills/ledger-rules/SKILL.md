@@ -53,9 +53,8 @@ Every new `ClaimKind` variant needs all four, in the same change:
   over macros wherever a `const fn`, an associated const or a generic can say
   the same thing.
 - Limits, versions and ids are named constants, never repeated literals.
-- Before finishing a change, run
-  `cargo clippy --workspace --all-targets -- -W clippy::missing_const_for_fn`
-  and make what it lists `const`.
+- `clippy::missing_const_for_fn` is on for the whole workspace, so CI fails on
+  a function that could be `const` and is not.
 
 ## OS-dependent code lives in its own crate
 - Anything that differs by operating system (memory mapping, file locking,
