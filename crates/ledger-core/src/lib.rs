@@ -301,12 +301,43 @@ pub enum Status {
     Retracted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Entry {
+    id: ClaimId,
+    claim: Claim,
+    /// Positions of the premises in `Ledger::entries`, each smaller than this entry's own.
+    premises: Vec<usize>,
+    verdicts: Vec<Verdict>,
+    retracted: bool,
+}
+
+impl Entry {
+    /// This claim's status, given the statuses of its premises.
+    fn status(&self, premise: impl Fn(usize) -> Status) -> Status {
+        let any = |f: fn(&Verdict) -> bool| self.verdicts.iter().any(f);
+        if self.retracted {
+            Status::Retracted
+        } else if any(|v| matches!(v, Verdict::Refuted { .. })) {
+            Status::Refuted
+        } else if self.premises.iter().any(|&p| premise(p) != Status::Held) {
+            Status::Blocked
+        } else if any(|v| matches!(v, Verdict::Held { .. })) {
+            Status::Held
+        } else if self.verdicts.is_empty() {
+            Status::Unchecked
+        } else {
+            Status::Inconclusive
+        }
+    }
+}
+
 /// State rebuilt by folding events. Status is never stored, only derived.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Ledger {
-    claims: BTreeMap<ClaimId, Claim>,
-    verdicts: BTreeMap<ClaimId, Vec<Verdict>>,
-    retracted: BTreeSet<ClaimId>,
+    index: BTreeMap<ClaimId, usize>,
+    /// Proposal order. A premise is always proposed before its dependents
+    /// (content-addressed), so this is also a dependency order.
+    entries: Vec<Entry>,
     evidence: BTreeMap<EvidenceId, EvidenceKind>,
 }
 
@@ -320,17 +351,20 @@ impl Ledger {
             Event::Proposed { claim } => {
                 let claim = claim.0;
                 let id = claim.id()?;
-                if self.claims.contains_key(&id) {
+                if self.index.contains_key(&id) {
                     return Err(CoreError::DuplicateClaim(id));
                 }
-                if let Some(p) = claim
-                    .premises
-                    .iter()
-                    .find(|p| !self.claims.contains_key(*p))
-                {
-                    return Err(CoreError::UnknownClaim(p.clone()));
-                }
-                self.claims.insert(id, claim);
+                let premises = (claim.premises.iter())
+                    .map(|p| self.position(p))
+                    .collect::<Result<_, _>>()?;
+                self.index.insert(id.clone(), self.entries.len());
+                self.entries.push(Entry {
+                    id,
+                    claim,
+                    premises,
+                    verdicts: Vec::new(),
+                    retracted: false,
+                });
             }
             Event::EvidenceAdded { id, kind } => {
                 self.evidence.insert(id, kind);
@@ -340,40 +374,41 @@ impl Ledger {
                 evidence,
                 verdict,
             } => {
-                self.known(&claim)?;
+                let at = self.position(&claim)?;
                 if let Some(e) = evidence.iter().find(|e| !self.evidence.contains_key(*e)) {
                     return Err(CoreError::UnknownEvidence(e.clone()));
                 }
-                self.verdicts.entry(claim).or_default().push(verdict);
+                self.entries[at].verdicts.push(verdict);
             }
             Event::Retracted { claim, .. } => {
-                self.known(&claim)?;
-                self.retracted.insert(claim);
+                let at = self.position(&claim)?;
+                self.entries[at].retracted = true;
             }
         }
         Ok(())
     }
 
-    fn known(&self, id: &ClaimId) -> Result<(), CoreError> {
-        if self.claims.contains_key(id) {
-            Ok(())
-        } else {
-            Err(CoreError::UnknownClaim(id.clone()))
-        }
+    fn position(&self, id: &ClaimId) -> Result<usize, CoreError> {
+        (self.index.get(id).copied()).ok_or_else(|| CoreError::UnknownClaim(id.clone()))
     }
 
+    fn entry(&self, id: &ClaimId) -> Option<&Entry> {
+        self.index.get(id).map(|&at| &self.entries[at])
+    }
+
+    /// Claims in the order they were proposed.
     pub fn claims(&self) -> impl Iterator<Item = (&ClaimId, &Claim)> {
-        self.claims.iter()
+        self.entries.iter().map(|e| (&e.id, &e.claim))
     }
 
     #[must_use]
     pub fn claim(&self, id: &ClaimId) -> Option<&Claim> {
-        self.claims.get(id)
+        self.entry(id).map(|e| &e.claim)
     }
 
     #[must_use]
     pub fn verdicts(&self, id: &ClaimId) -> &[Verdict] {
-        self.verdicts.get(id).map_or(&[], Vec::as_slice)
+        self.entry(id).map_or(&[], |e| &e.verdicts)
     }
 
     #[must_use]
@@ -381,32 +416,37 @@ impl Ledger {
         self.evidence.get(id).copied()
     }
 
-    /// Derived from verdicts and premises. Premises always predate the claim
-    /// (content-addressed), so recursion terminates.
+    /// Derived from verdicts and premises. Settles the claim's premise closure
+    /// once each, in dependency order, so shared premises cost nothing extra.
     #[must_use]
     pub fn status(&self, id: &ClaimId) -> Option<Status> {
-        let claim = self.claims.get(id)?;
-        if self.retracted.contains(id) {
-            return Some(Status::Retracted);
+        let target = *self.index.get(id)?;
+        let mut closure = BTreeSet::from([target]);
+        let mut todo = vec![target];
+        while let Some(at) = todo.pop() {
+            for &p in &self.entries[at].premises {
+                if closure.insert(p) {
+                    todo.push(p);
+                }
+            }
         }
-        let vs = self.verdicts(id);
-        if vs.iter().any(|v| matches!(v, Verdict::Refuted { .. })) {
-            return Some(Status::Refuted);
+        // Ascending position: every premise is settled before the claims that rest on it.
+        let mut settled = BTreeMap::new();
+        for at in closure {
+            let status = self.entries[at].status(|p| settled[&p]);
+            settled.insert(at, status);
         }
-        if claim
-            .premises
-            .iter()
-            .any(|p| self.status(p) != Some(Status::Held))
-        {
-            return Some(Status::Blocked);
+        settled.get(&target).copied()
+    }
+
+    /// Every claim's status, in one pass in proposal order.
+    pub fn statuses(&self) -> impl Iterator<Item = (&ClaimId, Status)> {
+        let mut settled: Vec<Status> = Vec::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            let status = entry.status(|p| settled[p]);
+            settled.push(status);
         }
-        Some(if vs.iter().any(|v| matches!(v, Verdict::Held { .. })) {
-            Status::Held
-        } else if vs.is_empty() {
-            Status::Unchecked
-        } else {
-            Status::Inconclusive
-        })
+        self.entries.iter().map(|e| &e.id).zip(settled)
     }
 }
 
@@ -526,7 +566,85 @@ mod tests {
         insta::assert_snapshot!("response_schema", schema().sentence());
     }
 
+    /// The definition of status, as plain recursion. Exponential on shared premises.
+    fn status_by_recursion(l: &Ledger, id: &ClaimId) -> Status {
+        let entry = &l.entries[l.index[id]];
+        entry.status(|p| status_by_recursion(l, &l.entries[p].id))
+    }
+
+    /// Claim `n` rests on the claims named in `premises` (earlier ones only).
+    fn numbered(n: u64, premises: &[ClaimId]) -> Claim {
+        let mut c = layout(32 + n);
+        c.premises = premises.iter().cloned().collect();
+        c
+    }
+
+    #[test]
+    fn shared_premises_are_settled_once() -> Result<(), CoreError> {
+        // Each claim rests on the two before it: plain recursion would take about 2^140 steps.
+        let mut l = Ledger::default();
+        let mut ids: Vec<ClaimId> = Vec::new();
+        for n in 0..200 {
+            let c = numbered(n, &ids[ids.len().saturating_sub(2)..]);
+            ids.push(c.id()?);
+            l.apply(Event::Proposed { claim: admit(c)? })?;
+            l.apply(Event::Checked {
+                claim: ids[ids.len() - 1].clone(),
+                evidence: BTreeSet::new(),
+                verdict: Verdict::Held {
+                    runs: NonZeroU64::MIN,
+                },
+            })?;
+        }
+        assert_eq!(l.status(&ids[199]), Some(Status::Held));
+        l.apply(Event::Retracted {
+            claim: ids[0].clone(),
+            reason: String::new(),
+        })?;
+        assert_eq!(l.status(&ids[199]), Some(Status::Blocked));
+        assert!(l.statuses().skip(1).all(|(_, s)| s == Status::Blocked));
+        Ok(())
+    }
+
     proptest! {
+        #[test]
+        fn status_agrees_with_plain_recursion(
+            // Per claim: which earlier claims it rests on, and what happens to it (0 = nothing).
+            shape in proptest::collection::vec((proptest::collection::vec(any::<prop::sample::Index>(), 0..3), 0..5u8), 1..12),
+        ) {
+            let mut l = Ledger::default();
+            let mut ids: Vec<ClaimId> = Vec::new();
+            for (n, (premises, fate)) in shape.iter().enumerate() {
+                let premises: Vec<ClaimId> = if ids.is_empty() {
+                    Vec::new()
+                } else {
+                    premises.iter().map(|i| i.get(&ids).clone()).collect()
+                };
+                let c = numbered(n as u64, &premises);
+                let id = c.id()?;
+                ids.push(id.clone());
+                l.apply(Event::Proposed { claim: admit(c)? })?;
+                let verdict = match fate {
+                    1 => Some(Verdict::Held { runs: NonZeroU64::MIN }),
+                    2 => Some(Verdict::Inconclusive { reason: String::new() }),
+                    3 => Some(Verdict::Refuted {
+                        counterexample: Counterexample { evidence: EvidenceId::of(b"e"), detail: String::new() },
+                    }),
+                    _ => None,
+                };
+                if let Some(verdict) = verdict {
+                    l.apply(Event::Checked { claim: id.clone(), evidence: BTreeSet::new(), verdict })?;
+                }
+                if *fate == 4 {
+                    l.apply(Event::Retracted { claim: id, reason: String::new() })?;
+                }
+            }
+            for (id, status) in l.statuses() {
+                prop_assert_eq!(status, status_by_recursion(&l, id));
+                prop_assert_eq!(l.status(id), Some(status));
+            }
+        }
+
         #[test]
         fn id_is_stable_across_roundtrip(size in 20u64..1 << 20) {
             let c = layout(size);
