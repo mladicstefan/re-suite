@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: body(asks).sentence()
+---
+`POST search.example/1/indexes/{index}/query` request bodies match JSON Schema f84b6447: 2 properties, 1 required.

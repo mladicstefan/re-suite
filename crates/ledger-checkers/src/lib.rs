@@ -340,14 +340,46 @@ impl Checker<'_> for SchemaChecker {
             .map_err(|e| CheckError::InvalidClaim(e.to_string()))?;
         Ok(replay(evidence, deadline, |exchange| {
             let body = exchange.response.as_ref().and_then(|r| r.body.as_ref());
-            let body = body.ok_or("the response has no body")?;
-            let json: serde_json::Value = serde_json::from_slice(&body_bytes(Some(body))?)
-                .map_err(|e| format!("the response body is not JSON: {e}"))?;
-            v.validate(&json)
-                .map_err(|e| match e.instance_path().as_str() {
-                    "" => format!("{e} at the top level"),
-                    path => format!("{e} at {path}"),
-                })
+            json_matches(&v, body, "response")
+        }))
+    }
+}
+
+/// Whether a captured body is JSON that the schema accepts. `whose` names it in the detail.
+fn json_matches(
+    schema: &jsonschema::Validator,
+    body: Option<&Body>,
+    whose: &str,
+) -> Result<(), String> {
+    let body = body.ok_or_else(|| format!("the {whose} has no body"))?;
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes(Some(body))?)
+        .map_err(|e| format!("the {whose} body is not JSON: {e}"))?;
+    schema
+        .validate(&json)
+        .map_err(|e| match e.instance_path().as_str() {
+            "" => format!("{e} at the top level"),
+            path => format!("{e} at {path}"),
+        })
+}
+
+pub struct BodySchemaChecker;
+
+impl Checker<'_> for BodySchemaChecker {
+    const ID: &'static str = "request_body_schema";
+    const VERSION: u32 = 1;
+    type Claim = ledger_core::RequestBodySchema;
+    type Evidence = HttpExchange;
+
+    fn check(
+        &self,
+        claim: &Self::Claim,
+        evidence: &[Item<HttpExchange>],
+        deadline: Instant,
+    ) -> Result<Verdict, CheckError> {
+        let v = jsonschema::validator_for(&claim.schema)
+            .map_err(|e| CheckError::InvalidClaim(e.to_string()))?;
+        Ok(replay(evidence, deadline, |exchange| {
+            json_matches(&v, exchange.request.body.as_ref(), "request")
         }))
     }
 }
@@ -473,6 +505,7 @@ impl Checker<'_> for HeaderChecker {
 #[must_use]
 pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
     let (id, version) = match claim {
+        ClaimKind::RequestBodySchema(_) => (BodySchemaChecker::ID, BodySchemaChecker::VERSION),
         ClaimKind::RequestHeader(_) => (HeaderChecker::ID, HeaderChecker::VERSION),
         ClaimKind::MemoryLayout(_) => (MemoryLayoutChecker::ID, MemoryLayoutChecker::VERSION),
         ClaimKind::RequestSignature(_) => (SignatureChecker::ID, SignatureChecker::VERSION),
@@ -544,6 +577,11 @@ pub fn check_claim(
     }
     let json = MAX_PARSED_EVIDENCE;
     match claim {
+        ClaimKind::RequestBodySchema(c) => {
+            let items = decode(EvidenceKind::HttpExchange, json, evidence, http_exchange)
+                .and_then(|items| about(&c.endpoint, |_| None, items));
+            run(&BodySchemaChecker, id, c, items, limit)
+        }
         ClaimKind::RequestHeader(c) => {
             let items = decode(EvidenceKind::HttpExchange, json, evidence, http_exchange)
                 .and_then(|items| about(&c.endpoint, |_| None, items));
@@ -1034,6 +1072,42 @@ mod tests {
             verdict(claim("authorization", serde_json::json!(true)))?,
             Verdict::Refuted { .. }
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn request_body_claims_hold_and_refute() -> Result<(), CheckError> {
+        let claim = |schema| ledger_core::RequestBodySchema {
+            endpoint: "POST /query".into(),
+            schema,
+        };
+        let search = exchange(
+            "/query",
+            ("a", "b"),
+            r#"{"query": "rust", "page": 0}"#,
+            200,
+            &serde_json::json!({}),
+        );
+        let form = exchange(
+            "/query",
+            ("a", "b"),
+            "query=rust&page=0",
+            200,
+            &serde_json::json!({}),
+        );
+        let run = |schema, capture: &HttpExchange| {
+            BodySchemaChecker.check(&claim(schema), &[item(b"e", capture.clone())], soon())
+        };
+        let asks =
+            serde_json::json!({"required": ["query"], "properties": {"page": {"type": "integer"}}});
+        assert!(matches!(run(asks.clone(), &search)?, Verdict::Held { .. }));
+        let wrong = serde_json::json!({"properties": {"page": {"type": "string"}}});
+        assert!(
+            matches!(run(wrong, &search)?, Verdict::Refuted { counterexample } if counterexample.detail.contains("/page"))
+        );
+        assert!(
+            matches!(run(asks, &form)?, Verdict::Refuted { counterexample } if counterexample.detail.contains("not JSON"))
+        );
         Ok(())
     }
 

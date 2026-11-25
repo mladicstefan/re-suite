@@ -272,9 +272,18 @@ pub struct RequestHeader {
     pub value: serde_json::Value,
 }
 
+/// Request bodies sent to an endpoint conform to a JSON Schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RequestBodySchema {
+    /// `METHOD [host]/path`, see [`Endpoint`].
+    pub endpoint: String,
+    pub schema: serde_json::Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimKind {
+    RequestBodySchema(RequestBodySchema),
     RequestHeader(RequestHeader),
     MemoryLayout(MemoryLayout),
     RequestSignature(RequestSignature),
@@ -303,6 +312,7 @@ impl Claim {
     #[must_use]
     pub const fn subject(&self) -> &str {
         match &self.kind {
+            ClaimKind::RequestBodySchema(b) => b.endpoint.as_str(),
             ClaimKind::RequestHeader(h) => h.endpoint.as_str(),
             ClaimKind::MemoryLayout(m) => m.type_name.as_str(),
             ClaimKind::RequestSignature(s) => s.endpoint.as_str(),
@@ -314,6 +324,13 @@ impl Claim {
     #[must_use]
     pub fn sentence(&self) -> String {
         match &self.kind {
+            ClaimKind::RequestBodySchema(b) => {
+                format!(
+                    "`{}` request bodies match {}.",
+                    b.endpoint,
+                    schema_summary(&b.schema)
+                )
+            }
             ClaimKind::RequestHeader(h) if h.value == serde_json::Value::Bool(true) => {
                 format!("`{}` requests carry header `{}`.", h.endpoint, h.header)
             }
@@ -433,6 +450,19 @@ fn accepts_everything(schema: &serde_json::Value) -> bool {
 pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
     let bad = |m: &str| Err(CoreError::Inadmissible(m.to_owned()));
     match &claim.kind {
+        ClaimKind::RequestBodySchema(b) => {
+            if let Err(why) = Endpoint::parse(&b.endpoint) {
+                return bad(why);
+            }
+            if !(b.schema.is_object() || b.schema.is_boolean()) {
+                return bad("a request body claim needs an object or boolean schema");
+            }
+            if accepts_everything(&b.schema) {
+                return bad(
+                    "this schema accepts every body, so nothing could refute it; say what a body must have",
+                );
+            }
+        }
         ClaimKind::RequestHeader(h) => {
             if let Err(why) = Endpoint::parse(&h.endpoint) {
                 return bad(why);
@@ -1338,6 +1368,19 @@ mod tests {
                 .contains("signed")
         );
         insta::assert_snapshot!("response_schema", schema().sentence());
+        let body = |schema| Claim {
+            kind: ClaimKind::RequestBodySchema(RequestBodySchema {
+                endpoint: "POST search.example/1/indexes/{index}/query".into(),
+                schema,
+            }),
+            premises: BTreeSet::new(),
+        };
+        let asks = serde_json::json!({"required": ["query"], "properties": {"query": {"type": "string"}, "page": {"type": "integer"}}});
+        insta::assert_snapshot!("request_body_schema", body(asks).sentence());
+        assert!(
+            admit(body(serde_json::json!({}))).is_err(),
+            "an empty schema says nothing"
+        );
         let header = |value| Claim {
             kind: ClaimKind::RequestHeader(RequestHeader {
                 endpoint: "POST search.example/1/indexes/{index}/query".into(),
