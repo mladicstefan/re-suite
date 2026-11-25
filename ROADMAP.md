@@ -469,6 +469,7 @@ honestly.
 | --- | --- | --- | --- |
 | 1, Half-Life saves (`docs/trials/half-life-saves.md`) | 20 of 21 | 1.17, about 440 tokens of tool traffic | 0 of 2 |
 | 2, web traffic (`docs/trials/web-api.md`) | 19 of 19 | 1.67, about 500 tokens of tool traffic | 1 of 1 |
+| 3, real websites (`docs/trials/real-sites.md`) | 14 of 15; the one that held is true of the captures | 2.0, about 600 tokens of tool traffic | not measured |
 
 ## 12. Not goals
 
@@ -488,6 +489,9 @@ honestly.
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
 | One flush on the current disk (btrfs on dm-crypt) takes 6.2 ms, so durable `propose` has a 7.2 ms median against the 2 ms budget, and 961 events/s against 1,000. Move the ledger to a filesystem with faster flushes, relax the budget for this machine, or allow `synchronous=NORMAL` for interactive writes? | Before the Phase 1 Store box is ticked |
 | A request-signature claim carries its key (`key_hex`), so the key is in the event log and in the claim's hash, while section 7 says secrets are stored as evidence. Move the key to evidence and have the claim cite it? | Before the trial run |
+| A response can depend on the query string (a forecast has `current` only when asked for), and an endpoint ignores the query. Should a claim be able to name query parameters it applies to? | Phase 2, claim kinds |
+| A request-signature claim has no status, so a capture of a request the server rejected would refute a true claim. Bind signature claims to accepted requests? | Phase 2, hardening |
+| The agent must know which captures belong to an endpoint, and adds evidence one file per call. Import HAR files, and let `ask` list the evidence about an endpoint? | Phase 2, hardening |
 | A request-signature claim can only say "MAC of the body". Which signed inputs (timestamp, nonce, path, query) should the kind be able to express? | Phase 2, claim kinds |
 | Every response-schema claim has the same sentence. What should it say about the schema so a human can tell two claims apart? | Phase 3, sentences |
 | How far does VerifiedIDA's standard overlap, and should we build on it or interoperate? | Before the open format in Phase 6 |
