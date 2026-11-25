@@ -33,6 +33,8 @@ pub enum CheckError {
 /// A saved piece of evidence, decoded to the checker's type.
 pub struct Item<E> {
     pub id: EvidenceId,
+    /// Size of the stored evidence in bytes: the smallest capture that disagrees is the one shown.
+    pub size: usize,
     pub data: E,
 }
 
@@ -77,22 +79,35 @@ fn replay<E: Sync>(
         };
     };
     let late = AtomicBool::new(false);
-    let failure = evidence.par_iter().find_map_first(|it| {
-        if Instant::now() >= deadline {
-            late.store(true, Ordering::Relaxed);
-            return None;
-        }
-        one(&it.data).err().map(|d| (it.id.clone(), d))
-    });
-    match failure {
-        Some((evidence, mut detail)) => {
+    // Every capture is replayed, not just up to the first failure: the reader gets the
+    // smallest one that disagrees, and is told how many do.
+    let failures: Vec<(usize, usize, String)> = (evidence.par_iter().enumerate())
+        .filter_map(|(at, it)| {
+            if Instant::now() >= deadline {
+                late.store(true, Ordering::Relaxed);
+                return None;
+            }
+            one(&it.data).err().map(|detail| (it.size, at, detail))
+        })
+        .collect();
+    let disagree = failures.len();
+    match failures.into_iter().min() {
+        Some((_, at, mut detail)) => {
             // A validator can quote a whole response; a counterexample stays a sentence.
             if let Some((cut, _)) = detail.char_indices().nth(MAX_DETAIL) {
                 detail.truncate(cut);
                 detail.push('…');
             }
+            if disagree > 1 {
+                detail = format!(
+                    "{detail} ({disagree} of {runs} captures disagree; this is the smallest)"
+                );
+            }
             Verdict::Refuted {
-                counterexample: Counterexample { evidence, detail },
+                counterexample: Counterexample {
+                    evidence: evidence[at].id.clone(),
+                    detail,
+                },
             }
         }
         None if late.load(Ordering::Relaxed) => Verdict::Inconclusive {
@@ -106,7 +121,7 @@ pub struct MemoryLayoutChecker;
 
 impl<'e> Checker<'e> for MemoryLayoutChecker {
     const ID: &'static str = "memory_layout";
-    const VERSION: u32 = 3;
+    const VERSION: u32 = 4;
     type Claim = MemoryLayout;
     type Evidence = &'e [u8];
 
@@ -247,7 +262,7 @@ pub struct SignatureChecker<'k> {
 
 impl Checker<'_> for SignatureChecker<'_> {
     const ID: &'static str = "request_signature";
-    const VERSION: u32 = 5;
+    const VERSION: u32 = 6;
     type Claim = RequestSignature;
     type Evidence = HttpExchange;
 
@@ -311,7 +326,7 @@ pub struct SchemaChecker;
 
 impl Checker<'_> for SchemaChecker {
     const ID: &'static str = "response_schema";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     type Claim = ResponseSchema;
     type Evidence = HttpExchange;
 
@@ -451,6 +466,7 @@ pub fn check_claim(
                 let data = parse(bytes).map_err(|e| CheckError::Malformed(id.clone(), e))?;
                 Ok(Item {
                     id: id.clone(),
+                    size: bytes.len(),
                     data,
                 })
             })
@@ -558,6 +574,7 @@ mod tests {
     fn item<E>(name: &[u8], data: E) -> Item<E> {
         Item {
             id: EvidenceId::of(name),
+            size: name.len(),
             data,
         }
     }
@@ -804,6 +821,38 @@ mod tests {
         if let Err(e) = about(&schema("POST /nowhere"), &serde)? {
             assert!(!e.to_string().contains("include"), "{e}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn the_smallest_capture_that_disagrees_is_shown() -> Result<(), CheckError> {
+        let claim = MemoryLayout {
+            type_name: "T".into(),
+            size: 64,
+            fields: vec![],
+        };
+        // Sizes 40, 80, 8 and 20: three are too short, and the 8-byte one is the smallest.
+        let snapshots = [vec![0u8; 40], vec![0; 80], vec![0; 8], vec![0; 20]];
+        let items: Vec<Item<&[u8]>> = (snapshots.iter())
+            .map(|bytes| Item {
+                id: EvidenceId::of(bytes),
+                size: bytes.len(),
+                data: &bytes[..],
+            })
+            .collect();
+        let Verdict::Refuted { counterexample } =
+            MemoryLayoutChecker.check(&claim, &items, soon())?
+        else {
+            return Err(CheckError::InvalidClaim("expected a refutation".into()));
+        };
+        assert_eq!(counterexample.evidence, EvidenceId::of(&[0u8; 8]));
+        assert!(
+            counterexample
+                .detail
+                .ends_with("(3 of 4 captures disagree; this is the smallest)"),
+            "{}",
+            counterexample.detail
+        );
         Ok(())
     }
 

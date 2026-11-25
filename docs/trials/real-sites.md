@@ -98,4 +98,7 @@ another status, another host, page-load noise, another method.
 - **Fixed afterwards: schema sentences were all alike.** A sentence now
   carries the start of the schema's hash and how many properties it
   names and requires.
-- **Still open from trial 2:** one counterexample per check.
+- **Changed afterwards: which counterexample is shown.** A check now
+  replays every capture and shows the smallest one that disagrees, with
+  how many do. It is still one mistake per attempt: the first thing
+  wrong in that capture.
