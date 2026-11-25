@@ -311,10 +311,11 @@ pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
             if m.type_name.is_empty() || m.size == 0 {
                 return bad("memory layout needs a type name and non-zero size");
             }
-            let mut fields = m.fields.clone();
-            fields.sort();
+            // By position, not by the derived order, which would compare names first.
+            let mut fields: Vec<&FieldLayout> = m.fields.iter().collect();
+            fields.sort_by_key(|f| f.offset);
             let mut end = 0;
-            for f in &fields {
+            for f in fields {
                 if f.len == 0 || f.offset < end || f.offset.saturating_add(f.len) > m.size {
                     return bad(&format!(
                         "field `{}` is empty, overlaps, or exceeds size",
@@ -677,6 +678,13 @@ mod tests {
         }
         assert!(admit(c).is_err());
         assert!(admit(layout(16)).is_err(), "pos exceeds size");
+
+        // Regression: fields are ordered by offset, whatever their names.
+        let mut c = layout(32);
+        if let ClaimKind::MemoryLayout(m) = &mut c.kind {
+            m.fields[0].name = "zz_first_by_offset".into();
+        }
+        assert!(admit(c).is_ok());
     }
 
     /// A layout with one typed field of `len` bytes.
