@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: layout(32).sentence()
+---
+`Player` is 32 bytes with 2 fields (hp at +0x0, pos at +0x8).

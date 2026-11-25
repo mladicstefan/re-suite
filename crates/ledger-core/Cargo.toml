@@ -1,0 +1,21 @@
+[package]
+name = "ledger-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+blake3 = "1.8.7"
+hex = "0.4.3"
+schemars = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+insta = "1.49.0"
+pretty_assertions = "1.4.1"
+proptest = "1.12.0"

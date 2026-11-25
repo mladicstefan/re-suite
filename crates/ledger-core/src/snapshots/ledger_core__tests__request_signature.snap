@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: signature().sentence()
+---
+Requests to /api/v2/score carry a HmacSha256 signature of the body in header `X-Sig`, Hex encoded.

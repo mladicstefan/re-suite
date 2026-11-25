@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: schema().sentence()
+---
+Responses from /api/v2/profile match the recorded JSON Schema.
