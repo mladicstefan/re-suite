@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "header(serde_json::json!({\"minLength\": 32})).sentence()"
+---
+`POST search.example/1/indexes/{index}/query` requests carry header `x-api-key` with a value matching JSON Schema ddaf13f0.

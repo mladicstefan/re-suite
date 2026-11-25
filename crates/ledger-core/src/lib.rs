@@ -261,9 +261,21 @@ pub struct ResponseSchema {
     pub schema: serde_json::Value,
 }
 
+/// Requests to an endpoint carry a header whose value matches a JSON Schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RequestHeader {
+    /// `METHOD [host]/path`, see [`Endpoint`].
+    pub endpoint: String,
+    pub header: String,
+    /// A JSON Schema for the header's value, which is a string: `{"const": "application/json"}`,
+    /// `{"pattern": "^Bearer "}`, `{"minLength": 32}`. `true` claims only that the header is sent.
+    pub value: serde_json::Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimKind {
+    RequestHeader(RequestHeader),
     MemoryLayout(MemoryLayout),
     RequestSignature(RequestSignature),
     ResponseSchema(ResponseSchema),
@@ -291,6 +303,7 @@ impl Claim {
     #[must_use]
     pub const fn subject(&self) -> &str {
         match &self.kind {
+            ClaimKind::RequestHeader(h) => h.endpoint.as_str(),
             ClaimKind::MemoryLayout(m) => m.type_name.as_str(),
             ClaimKind::RequestSignature(s) => s.endpoint.as_str(),
             ClaimKind::ResponseSchema(r) => r.endpoint.as_str(),
@@ -301,6 +314,15 @@ impl Claim {
     #[must_use]
     pub fn sentence(&self) -> String {
         match &self.kind {
+            ClaimKind::RequestHeader(h) if h.value == serde_json::Value::Bool(true) => {
+                format!("`{}` requests carry header `{}`.", h.endpoint, h.header)
+            }
+            ClaimKind::RequestHeader(h) => format!(
+                "`{}` requests carry header `{}` with a value matching JSON Schema {}.",
+                h.endpoint,
+                h.header,
+                schema_print(&h.value)
+            ),
             ClaimKind::MemoryLayout(m) if m.fields.is_empty() => {
                 format!("`{}` is {} bytes.", m.type_name, m.size)
             }
@@ -328,21 +350,11 @@ impl Claim {
                 s.encoding
             ),
             ClaimKind::ResponseSchema(r) => {
-                // Two schema claims for one endpoint must not read alike: the print is
-                // the start of the schema's hash, and the counts say how much it asks.
-                let print = blake3::hash(r.schema.to_string().as_bytes()).to_hex();
-                let count = |key: &str| match r.schema.get(key) {
-                    Some(serde_json::Value::Object(map)) => map.len(),
-                    Some(serde_json::Value::Array(list)) => list.len(),
-                    _ => 0,
-                };
                 format!(
-                    "{} responses to `{}` match JSON Schema {}: {} properties, {} required.",
+                    "{} responses to `{}` match {}.",
                     r.status,
                     r.endpoint,
-                    &print[..8],
-                    count("properties"),
-                    count("required")
+                    schema_summary(&r.schema)
                 )
             }
         }
@@ -365,6 +377,27 @@ impl<'de> Deserialize<'de> for WellFormed<Claim> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         admit(Claim::deserialize(d)?).map_err(serde::de::Error::custom)
     }
+}
+
+/// The first eight characters of a schema's hash: enough to tell two schemas apart in a sentence.
+fn schema_print(schema: &serde_json::Value) -> String {
+    let hash = blake3::hash(schema.to_string().as_bytes()).to_hex();
+    hash[..8].to_owned()
+}
+
+/// A schema in a sentence: its print and how much it asks for.
+fn schema_summary(schema: &serde_json::Value) -> String {
+    let count = |key: &str| match schema.get(key) {
+        Some(serde_json::Value::Object(map)) => map.len(),
+        Some(serde_json::Value::Array(list)) => list.len(),
+        _ => 0,
+    };
+    format!(
+        "JSON Schema {}: {} properties, {} required",
+        schema_print(schema),
+        count("properties"),
+        count("required")
+    )
 }
 
 /// Whether a JSON Schema accepts every value, so that no response could refute it:
@@ -400,6 +433,16 @@ fn accepts_everything(schema: &serde_json::Value) -> bool {
 pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
     let bad = |m: &str| Err(CoreError::Inadmissible(m.to_owned()));
     match &claim.kind {
+        ClaimKind::RequestHeader(h) => {
+            if let Err(why) = Endpoint::parse(&h.endpoint) {
+                return bad(why);
+            }
+            if h.header.is_empty() || !(h.value.is_object() || h.value.is_boolean()) {
+                return bad(
+                    "a header claim needs a header name and an object or boolean schema for its value",
+                );
+            }
+        }
         ClaimKind::MemoryLayout(m) => {
             if m.type_name.is_empty() || m.size == 0 {
                 return bad("memory layout needs a type name and non-zero size");
@@ -1295,6 +1338,24 @@ mod tests {
                 .contains("signed")
         );
         insta::assert_snapshot!("response_schema", schema().sentence());
+        let header = |value| Claim {
+            kind: ClaimKind::RequestHeader(RequestHeader {
+                endpoint: "POST search.example/1/indexes/{index}/query".into(),
+                header: "x-api-key".into(),
+                value,
+            }),
+            premises: BTreeSet::new(),
+        };
+        insta::assert_snapshot!(
+            "request_header",
+            header(serde_json::json!({"minLength": 32})).sentence()
+        );
+        insta::assert_snapshot!(
+            "request_header_present",
+            header(serde_json::json!(true)).sentence()
+        );
+        assert!(admit(header(serde_json::json!(true))).is_ok());
+        assert!(admit(header(serde_json::json!("a string is not a schema"))).is_err());
     }
 
     /// The definition of status, as plain recursion. Exponential on shared premises.

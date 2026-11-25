@@ -435,11 +435,45 @@ fn about(
     Ok(evidence)
 }
 
+pub struct HeaderChecker;
+
+impl Checker<'_> for HeaderChecker {
+    const ID: &'static str = "request_header";
+    const VERSION: u32 = 1;
+    type Claim = ledger_core::RequestHeader;
+    type Evidence = HttpExchange;
+
+    fn check(
+        &self,
+        claim: &Self::Claim,
+        evidence: &[Item<HttpExchange>],
+        deadline: Instant,
+    ) -> Result<Verdict, CheckError> {
+        let value = jsonschema::validator_for(&claim.value)
+            .map_err(|e| CheckError::InvalidClaim(e.to_string()))?;
+        Ok(replay(evidence, deadline, |exchange| {
+            let found = (exchange.request.headers.iter())
+                .find(|h| h.name.eq_ignore_ascii_case(&claim.header))
+                .ok_or_else(|| format!("header `{}` missing", claim.header))?;
+            // The value can be a key or a token, so the counterexample does not quote it.
+            if value.is_valid(&serde_json::Value::String(found.value.clone())) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "header `{}` is sent, but its value does not match the schema",
+                    claim.header
+                ))
+            }
+        }))
+    }
+}
+
 /// The checker that `check_claim` runs for a claim, by id and version. With the
 /// claim and the evidence, this is what a recorded verdict is cached on.
 #[must_use]
 pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
     let (id, version) = match claim {
+        ClaimKind::RequestHeader(_) => (HeaderChecker::ID, HeaderChecker::VERSION),
         ClaimKind::MemoryLayout(_) => (MemoryLayoutChecker::ID, MemoryLayoutChecker::VERSION),
         ClaimKind::RequestSignature(_) => (SignatureChecker::ID, SignatureChecker::VERSION),
         ClaimKind::ResponseSchema(_) => (SchemaChecker::ID, SchemaChecker::VERSION),
@@ -510,6 +544,11 @@ pub fn check_claim(
     }
     let json = MAX_PARSED_EVIDENCE;
     match claim {
+        ClaimKind::RequestHeader(c) => {
+            let items = decode(EvidenceKind::HttpExchange, json, evidence, http_exchange)
+                .and_then(|items| about(&c.endpoint, |_| None, items));
+            run(&HeaderChecker, id, c, items, limit)
+        }
         ClaimKind::MemoryLayout(c) => {
             let items = decode(EvidenceKind::MemorySnapshot, usize::MAX, evidence, Ok);
             run(&MemoryLayoutChecker, id, c, items, limit)
@@ -952,6 +991,49 @@ mod tests {
         // The body alone is not what this endpoint signs.
         claim.signed.clear();
         assert!(matches!(run(&claim, 200)?, Ok(Verdict::Refuted { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn header_claims_hold_refute_and_keep_the_value_out() -> Result<(), CheckError> {
+        let claim = |header: &str, value: serde_json::Value| ledger_core::RequestHeader {
+            endpoint: "POST /query".into(),
+            header: header.into(),
+            value,
+        };
+        let capture = exchange(
+            "/query",
+            ("X-Api-Key", "s3cret-token-0123456789"),
+            "{}",
+            200,
+            &serde_json::json!({}),
+        );
+        let verdict = |claim| HeaderChecker.check(&claim, &[item(b"e", capture.clone())], soon());
+        // Names are matched without regard to case, as everywhere.
+        assert!(matches!(
+            verdict(claim("x-api-key", serde_json::json!({"minLength": 20})))?,
+            Verdict::Held { .. }
+        ));
+        assert!(matches!(
+            verdict(claim("x-api-key", serde_json::json!(true)))?,
+            Verdict::Held { .. }
+        ));
+        let Verdict::Refuted { counterexample } = verdict(claim(
+            "x-api-key",
+            serde_json::json!({"pattern": "^Bearer "}),
+        ))?
+        else {
+            return Err(CheckError::InvalidClaim("expected a refutation".into()));
+        };
+        assert!(
+            !counterexample.detail.contains("s3cret"),
+            "{}",
+            counterexample.detail
+        );
+        assert!(matches!(
+            verdict(claim("authorization", serde_json::json!(true)))?,
+            Verdict::Refuted { .. }
+        ));
         Ok(())
     }
 

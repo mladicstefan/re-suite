@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "header(serde_json::json!(true)).sentence()"
+---
+`POST search.example/1/indexes/{index}/query` requests carry header `x-api-key`.
