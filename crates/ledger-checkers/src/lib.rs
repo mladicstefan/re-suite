@@ -140,17 +140,69 @@ impl<'e> Checker<'e> for MemoryLayoutChecker {
                     claim.size
                 ));
             }
-            for field in &claim.fields {
-                let Some(kind) = &field.is else { continue };
-                // The claim may not have been through admission, so nothing is assumed to fit.
-                let found = usize::try_from(field.offset)
-                    .ok()
-                    .zip(usize::try_from(field.len).ok())
-                    .and_then(|(at, len)| bytes.get(at..at.checked_add(len)?))
-                    .ok_or_else(|| format!("field `{}` lies outside the snapshot", field.name))?;
-                field_holds(kind, found).map_err(|why| {
-                    format!("field `{}` at +{:#x} {why}", field.name, field.offset)
+            fields_hold(&claim.fields, bytes)
+        }))
+    }
+}
+
+/// `len` bytes at `offset`, if they are all there.
+fn slice(bytes: &[u8], offset: u64, len: u64) -> Option<&[u8]> {
+    let at = usize::try_from(offset).ok()?;
+    bytes.get(at..at.checked_add(usize::try_from(len).ok()?)?)
+}
+
+/// Whether every typed field holds in `bytes`, which start where the fields' offsets do.
+fn fields_hold(fields: &[ledger_core::FieldLayout], bytes: &[u8]) -> Result<(), String> {
+    for field in fields {
+        let Some(kind) = &field.is else { continue };
+        // The claim may not have been through admission, so nothing is assumed to fit.
+        let found = slice(bytes, field.offset, field.len)
+            .ok_or_else(|| format!("field `{}` lies outside the snapshot", field.name))?;
+        field_holds(kind, found)
+            .map_err(|why| format!("field `{}` at +{:#x} {why}", field.name, field.offset))?;
+    }
+    Ok(())
+}
+
+pub struct RecordArrayChecker;
+
+impl<'e> Checker<'e> for RecordArrayChecker {
+    const ID: &'static str = "record_array";
+    const VERSION: u32 = 1;
+    type Claim = ledger_core::RecordArray;
+    type Evidence = &'e [u8];
+
+    fn check(
+        &self,
+        claim: &Self::Claim,
+        evidence: &[Item<&'e [u8]>],
+        deadline: Instant,
+    ) -> Result<Verdict, CheckError> {
+        Ok(replay(evidence, deadline, |bytes| {
+            let count = slice(bytes, claim.count_offset, claim.count_len)
+                .map(uint)
+                .ok_or("the count lies outside the snapshot")?;
+            let len = bytes.len() as u64;
+            // The records must fit before any of them is read, so a wild count costs nothing.
+            let end = (count.checked_mul(claim.stride))
+                .and_then(|records| records.checked_add(claim.first))
+                .filter(|end| *end <= len)
+                .ok_or_else(|| {
+                    format!(
+                        "the count is {count}, which needs more than the snapshot's {len} bytes"
+                    )
                 })?;
+            if claim.exact && end != len {
+                return Err(format!(
+                    "the count is {count}, so the records end at +{end:#x}, but {} more bytes follow",
+                    len - end
+                ));
+            }
+            for index in 0..count {
+                let record = slice(bytes, claim.first + index * claim.stride, claim.stride)
+                    .ok_or("a record lies outside the snapshot")?;
+                fields_hold(&claim.fields, record)
+                    .map_err(|why| format!("record {index}: {why}"))?;
             }
             Ok(())
         }))
@@ -529,6 +581,7 @@ impl Checker<'_> for StatusChecker {
 #[must_use]
 pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
     let (id, version) = match claim {
+        ClaimKind::RecordArray(_) => (RecordArrayChecker::ID, RecordArrayChecker::VERSION),
         ClaimKind::StatusSet(_) => (StatusChecker::ID, StatusChecker::VERSION),
         ClaimKind::RequestBodySchema(_) => (BodySchemaChecker::ID, BodySchemaChecker::VERSION),
         ClaimKind::RequestHeader(_) => (HeaderChecker::ID, HeaderChecker::VERSION),
@@ -627,6 +680,7 @@ pub fn check_claim(
 ) -> Result<Verdict, CheckError> {
     let any_status = |_: Option<u16>| None;
     match claim {
+        ClaimKind::RecordArray(c) => run(&RecordArrayChecker, id, c, snapshots(evidence), limit),
         ClaimKind::StatusSet(c) => {
             // A request that was never answered says nothing about which statuses come back.
             let unanswered = |got: Option<u16>| {
@@ -1223,6 +1277,51 @@ mod tests {
             run(&claim(&[200]), &[&unanswered]),
             Err(CheckError::NotApplicable(..))
         ));
+        Ok(())
+    }
+
+    /// Trial 1's `.HL3` files: a count, then that many 4-byte entity indices, and nothing else.
+    #[test]
+    fn record_arrays_follow_their_count() -> Result<(), CheckError> {
+        let claim = ledger_core::RecordArray {
+            type_name: "EntityList".into(),
+            count_offset: 0,
+            count_len: 4,
+            first: 4,
+            stride: 4,
+            fields: vec![FieldLayout {
+                name: "index".into(),
+                offset: 0,
+                len: 4,
+                is: Some(FieldKind::Uint { min: 1, max: 4095 }),
+            }],
+            exact: true,
+        };
+        let file = |count: u32, values: &[u32]| {
+            let mut bytes = count.to_le_bytes().to_vec();
+            for v in values {
+                bytes.extend(v.to_le_bytes());
+            }
+            bytes
+        };
+        let verdict =
+            |bytes: Vec<u8>| RecordArrayChecker.check(&claim, &[item(b"e", &bytes[..])], soon());
+        let detail = |bytes: Vec<u8>| match verdict(bytes) {
+            Ok(Verdict::Refuted { counterexample }) => counterexample.detail,
+            other => format!("{other:?}"),
+        };
+        assert!(matches!(
+            verdict(file(3, &[1, 183, 320]))?,
+            Verdict::Held { .. }
+        ));
+        assert!(
+            matches!(verdict(file(0, &[]))?, Verdict::Held { .. }),
+            "an empty list is a list"
+        );
+        assert!(detail(file(4, &[1, 183, 320])).starts_with("the count is 4, which needs more"));
+        assert!(detail(file(2, &[1, 183, 320])).contains("4 more bytes follow"));
+        assert!(detail(file(3, &[1, 183, 9000])).starts_with("record 2: field `index`"));
+        assert!(detail(file(u32::MAX, &[1])).starts_with("the count is 4294967295"));
         Ok(())
     }
 

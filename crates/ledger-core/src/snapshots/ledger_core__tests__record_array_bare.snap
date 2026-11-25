@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "array(16, vec![], false).sentence()"
+---
+`EntityList` has a 4-byte count at +0x0, then that many 16-byte records from +0x4.

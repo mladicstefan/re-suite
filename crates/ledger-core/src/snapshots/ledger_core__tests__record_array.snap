@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "array(4, vec![index.clone()], true).sentence()"
+---
+`EntityList` has a 4-byte count at +0x0, then that many 4-byte records from +0x4, and nothing after them. Contents checked for 1 of 1 fields per record.

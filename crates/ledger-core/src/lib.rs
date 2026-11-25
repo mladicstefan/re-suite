@@ -288,9 +288,30 @@ pub struct StatusSet {
     pub statuses: BTreeSet<u16>,
 }
 
+/// A count, followed by that many records of one fixed size.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecordArray {
+    pub type_name: String,
+    /// Where the little-endian count is.
+    pub count_offset: u64,
+    /// Bytes in the count: 1, 2, 4 or 8.
+    pub count_len: u64,
+    /// Where the first record starts.
+    pub first: u64,
+    /// Bytes per record.
+    pub stride: u64,
+    /// What each record holds, with offsets from the start of the record.
+    #[serde(default)]
+    pub fields: Vec<FieldLayout>,
+    /// Whether the snapshot ends right after the last record.
+    #[serde(default)]
+    pub exact: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimKind {
+    RecordArray(RecordArray),
     StatusSet(StatusSet),
     RequestBodySchema(RequestBodySchema),
     RequestHeader(RequestHeader),
@@ -321,6 +342,7 @@ impl Claim {
     #[must_use]
     pub const fn subject(&self) -> &str {
         match &self.kind {
+            ClaimKind::RecordArray(r) => r.type_name.as_str(),
             ClaimKind::StatusSet(s) => s.endpoint.as_str(),
             ClaimKind::RequestBodySchema(b) => b.endpoint.as_str(),
             ClaimKind::RequestHeader(h) => h.endpoint.as_str(),
@@ -334,6 +356,22 @@ impl Claim {
     #[must_use]
     pub fn sentence(&self) -> String {
         match &self.kind {
+            ClaimKind::RecordArray(r) => {
+                let end = if r.exact {
+                    ", and nothing after them"
+                } else {
+                    ""
+                };
+                let checked = r.fields.iter().filter(|f| f.is.is_some()).count();
+                let fields = match r.fields.len() {
+                    0 => String::new(),
+                    all => format!(" Contents checked for {checked} of {all} fields per record."),
+                };
+                format!(
+                    "`{}` has a {}-byte count at +{:#x}, then that many {}-byte records from +{:#x}{end}.{fields}",
+                    r.type_name, r.count_len, r.count_offset, r.stride, r.first
+                )
+            }
             ClaimKind::StatusSet(s) => {
                 let statuses: Vec<String> = s.statuses.iter().map(u16::to_string).collect();
                 format!(
@@ -461,6 +499,27 @@ fn accepts_everything(schema: &serde_json::Value) -> bool {
     }
 }
 
+/// Whether fields lie inside `size` bytes without overlapping, each with a kind that fits it.
+fn fields_fit(fields: &[FieldLayout], size: u64) -> Result<(), String> {
+    // By position, not by the derived order, which would compare names first.
+    let mut fields: Vec<&FieldLayout> = fields.iter().collect();
+    fields.sort_by_key(|f| f.offset);
+    let mut end = 0;
+    for f in fields {
+        if f.len == 0 || f.offset < end || f.offset.saturating_add(f.len) > size {
+            return Err(format!(
+                "field `{}` is empty, overlaps, or exceeds size",
+                f.name
+            ));
+        }
+        if let Some(Err(why)) = f.is.as_ref().map(|kind| kind.fits(f.len)) {
+            return Err(format!("field `{}`: {why}", f.name));
+        }
+        end = f.offset + f.len;
+    }
+    Ok(())
+}
+
 /// Structural checks that do not need evidence.
 ///
 /// # Errors
@@ -468,6 +527,19 @@ fn accepts_everything(schema: &serde_json::Value) -> bool {
 pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
     let bad = |m: &str| Err(CoreError::Inadmissible(m.to_owned()));
     match &claim.kind {
+        ClaimKind::RecordArray(r) => {
+            if r.type_name.is_empty() || r.stride == 0 || !matches!(r.count_len, 1 | 2 | 4 | 8) {
+                return bad(
+                    "a record array needs a type name, a count of 1, 2, 4 or 8 bytes and a record size",
+                );
+            }
+            if r.count_offset.saturating_add(r.count_len) > r.first {
+                return bad("the count must end before the first record starts");
+            }
+            if let Err(why) = fields_fit(&r.fields, r.stride) {
+                return bad(&why);
+            }
+        }
         ClaimKind::StatusSet(s) => {
             if let Err(why) = Endpoint::parse(&s.endpoint) {
                 return bad(why);
@@ -504,21 +576,8 @@ pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
             if m.type_name.is_empty() || m.size == 0 {
                 return bad("memory layout needs a type name and non-zero size");
             }
-            // By position, not by the derived order, which would compare names first.
-            let mut fields: Vec<&FieldLayout> = m.fields.iter().collect();
-            fields.sort_by_key(|f| f.offset);
-            let mut end = 0;
-            for f in fields {
-                if f.len == 0 || f.offset < end || f.offset.saturating_add(f.len) > m.size {
-                    return bad(&format!(
-                        "field `{}` is empty, overlaps, or exceeds size",
-                        f.name
-                    ));
-                }
-                if let Some(Err(why)) = f.is.as_ref().map(|kind| kind.fits(f.len)) {
-                    return bad(&format!("field `{}`: {why}", f.name));
-                }
-                end = f.offset + f.len;
+            if let Err(why) = fields_fit(&m.fields, m.size) {
+                return bad(&why);
             }
         }
         ClaimKind::RequestSignature(s) => {
@@ -1395,6 +1454,39 @@ mod tests {
                 .contains("signed")
         );
         insta::assert_snapshot!("response_schema", schema().sentence());
+    }
+
+    #[test]
+    fn sentences_of_newer_kinds() {
+        let array = |stride, fields: Vec<FieldLayout>, exact| Claim {
+            kind: ClaimKind::RecordArray(RecordArray {
+                type_name: "EntityList".into(),
+                count_offset: 0,
+                count_len: 4,
+                first: 4,
+                stride,
+                fields,
+                exact,
+            }),
+            premises: BTreeSet::new(),
+        };
+        let index = FieldLayout {
+            name: "index".into(),
+            offset: 0,
+            len: 4,
+            is: Some(FieldKind::Uint { min: 1, max: 4095 }),
+        };
+        insta::assert_snapshot!(
+            "record_array",
+            array(4, vec![index.clone()], true).sentence()
+        );
+        insta::assert_snapshot!("record_array_bare", array(16, vec![], false).sentence());
+        assert!(admit(array(4, vec![index.clone()], true)).is_ok());
+        assert!(
+            admit(array(2, vec![index], true)).is_err(),
+            "a field longer than the record"
+        );
+        assert!(admit(array(0, vec![], true)).is_err());
         let statuses = |statuses: &[u16]| Claim {
             kind: ClaimKind::StatusSet(StatusSet {
                 endpoint: "GET crates.io/api/v1/crates/{name}".into(),
