@@ -302,7 +302,7 @@ pub enum Status {
 }
 
 /// State rebuilt by folding events. Status is never stored, only derived.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Ledger {
     claims: BTreeMap<ClaimId, Claim>,
     verdicts: BTreeMap<ClaimId, Vec<Verdict>>,
