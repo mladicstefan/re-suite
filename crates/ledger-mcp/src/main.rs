@@ -1,35 +1,45 @@
 //! MCP server over stdio. Agents file claims and evidence here; every check replays saved evidence.
+//! Handlers stay thin: parse, hand the blocking work to `tools`, reply.
 
-use std::fmt::Write as _;
+mod tools;
+
 use std::sync::Arc;
+use std::time::Instant;
 
-use ledger_core::{Claim, ClaimId, Event, EvidenceId, EvidenceKind, Ledger, Verdict, admit};
+use ledger_core::{Claim, EvidenceKind};
 use ledger_store::Store;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::transport::stdio;
 use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
+use tools::{About, Rejection};
 
 #[derive(rmcp::serde::Deserialize, JsonSchema)]
 #[serde(crate = "rmcp::serde")]
 struct ProposeArgs {
+    /// Premises may be given as short ids.
     claim: Claim,
-    /// Evidence to replay the claim against right away.
+    /// Ids of evidence to replay the claim against right away.
     #[serde(default)]
-    evidence: Vec<EvidenceId>,
+    evidence: Vec<String>,
 }
 
 #[derive(rmcp::serde::Deserialize, JsonSchema)]
 #[serde(crate = "rmcp::serde")]
 struct AskArgs {
-    /// Omit to list every claim.
-    claim: Option<ClaimId>,
+    about: About,
+    /// Claim id, for about=claim and about=affected.
+    claim: Option<String>,
+    /// Type name or endpoint, for about=subject.
+    subject: Option<String>,
+    /// To continue a list: the id on the last line of the previous page.
+    after: Option<String>,
 }
 
 #[derive(rmcp::serde::Deserialize, JsonSchema)]
 #[serde(crate = "rmcp::serde")]
 struct ExplainArgs {
-    claim: ClaimId,
+    claim: String,
 }
 
 #[derive(rmcp::serde::Deserialize, JsonSchema)]
@@ -43,7 +53,7 @@ struct AddEvidenceArgs {
 #[derive(rmcp::serde::Deserialize, JsonSchema)]
 #[serde(crate = "rmcp::serde")]
 struct RetractArgs {
-    claim: ClaimId,
+    claim: String,
     reason: String,
 }
 
@@ -52,75 +62,66 @@ struct LedgerServer {
     store: Arc<Store>,
 }
 
-fn bad(e: impl std::fmt::Display) -> ErrorData {
-    ErrorData::invalid_params(e.to_string(), None)
-}
-
-fn line(ledger: &Ledger, id: &ClaimId) -> String {
-    match (ledger.status(id), ledger.claim(id)) {
-        (Some(s), Some(c)) => format!("{s:?}\t{id}\t{}", c.sentence()),
-        _ => format!("unknown\t{id}"),
+impl LedgerServer {
+    /// Store calls, hashing and checks block, so they run off the async executor,
+    /// inside one trace span per verb.
+    async fn blocking(
+        &self,
+        verb: &'static str,
+        work: impl FnOnce(&Store) -> Result<String, Rejection> + Send + 'static,
+    ) -> Result<String, ErrorData> {
+        let store = Arc::clone(&self.store);
+        let joined = tokio::task::spawn_blocking(move || {
+            let span = tracing::info_span!("verb", verb);
+            let _entered = span.enter();
+            let start = Instant::now();
+            let result = work(&store);
+            let outcome = result.as_ref().map_or_else(|r| r.code, |_| "ok");
+            tracing::info!(elapsed = ?start.elapsed(), outcome, "done");
+            result
+        });
+        match joined.await {
+            Ok(Ok(text)) => Ok(text),
+            Ok(Err(r)) => {
+                let data =
+                    rmcp::serde_json::json!({"code": r.code, "subject": r.subject, "next": r.next});
+                Err(ErrorData::invalid_params(r.to_string(), Some(data)))
+            }
+            Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
+        }
     }
 }
 
-// shortcut: store and checker calls block the current-thread runtime; move to spawn_blocking if tools get slow.
 #[tool_router]
 impl LedgerServer {
-    #[tool(description = "File a typed claim; optionally replay it against evidence IDs at once.")]
+    #[tool(
+        description = "File a typed claim; optionally replay it against evidence ids at once. Proposing the same claim twice is a no-op."
+    )]
     async fn propose(
         &self,
         Parameters(args): Parameters<ProposeArgs>,
     ) -> Result<String, ErrorData> {
-        let claim = admit(args.claim).map_err(bad)?;
-        let id = claim.get().id().map_err(bad)?;
-        let kind = claim.get().kind.clone();
-        self.store.append(Event::Proposed { claim }).map_err(bad)?;
-        if !args.evidence.is_empty() {
-            let snapshot = self.store.snapshot();
-            let ledger = &snapshot.ledger;
-            let mut raw = Vec::new();
-            for e in &args.evidence {
-                let k = ledger
-                    .evidence_kind(e)
-                    .ok_or_else(|| bad(format!("unknown evidence {e}")))?;
-                let bytes = self
-                    .store
-                    .evidence(e)
-                    .map_err(bad)?
-                    .ok_or_else(|| bad(format!("missing bytes for {e}")))?;
-                raw.push((e.clone(), k, bytes));
-            }
-            let borrowed: Vec<_> = raw
-                .iter()
-                .map(|(e, k, b)| (e.clone(), *k, &b[..]))
-                .collect();
-            let limit = std::time::Duration::from_secs(5);
-            let verdict =
-                ledger_checkers::check_claim(&id, &kind, &borrowed, limit).map_err(bad)?;
-            let evidence = args.evidence.into_iter().collect();
-            self.store
-                .append(Event::Checked {
-                    claim: id.clone(),
-                    evidence,
-                    verdict,
-                })
-                .map_err(bad)?;
-        }
-        Ok(line(&self.store.snapshot().ledger, &id))
+        self.blocking("propose", move |store| {
+            tools::propose(store, args.claim, &args.evidence)
+        })
+        .await
     }
 
-    #[tool(description = "Status and sentence for one claim, or for all claims.")]
+    #[tool(
+        description = "Ask a fixed question: all claims, one claim, a subject, what is on hold, or what a claim's failure would affect. Lists come 50 rows at a time."
+    )]
     async fn ask(&self, Parameters(args): Parameters<AskArgs>) -> Result<String, ErrorData> {
-        let snapshot = self.store.snapshot();
-        let ledger = &snapshot.ledger;
-        Ok(match args.claim {
-            Some(id) => line(ledger, &id),
-            None => ledger
-                .claims()
-                .map(|(id, _)| line(ledger, id))
-                .collect::<Vec<_>>()
-                .join("\n"),
+        self.blocking("ask", move |store| {
+            let (claim, subject, after) = (args.claim, args.subject, args.after);
+            tools::ask(
+                store,
+                args.about,
+                claim.as_deref(),
+                subject.as_deref(),
+                after.as_deref(),
+            )
         })
+        .await
     }
 
     #[tool(description = "Why a claim has its status: premises, verdicts and counterexamples.")]
@@ -128,54 +129,30 @@ impl LedgerServer {
         &self,
         Parameters(args): Parameters<ExplainArgs>,
     ) -> Result<String, ErrorData> {
-        let snapshot = self.store.snapshot();
-        let ledger = &snapshot.ledger;
-        let claim = ledger
-            .claim(&args.claim)
-            .ok_or_else(|| bad(format!("unknown claim {}", args.claim)))?;
-        let mut out = line(ledger, &args.claim);
-        for p in &claim.premises {
-            let _ = write!(out, "\npremise: {}", line(ledger, p));
-        }
-        for v in ledger.verdicts(&args.claim) {
-            let _ = match v {
-                Verdict::Held { runs } => write!(out, "\nheld over {runs} runs"),
-                Verdict::Refuted { counterexample: c } => {
-                    write!(out, "\nrefuted by {}: {}", c.evidence, c.detail)
-                }
-                Verdict::Inconclusive { reason } => write!(out, "\ninconclusive: {reason}"),
-            };
-        }
-        Ok(out)
+        self.blocking("explain", move |store| tools::explain(store, &args.claim))
+            .await
     }
 
-    #[tool(
-        description = "Store a saved local capture or snapshot as evidence; returns its content hash."
-    )]
+    #[tool(description = "Store a saved local capture or snapshot as evidence; returns its id.")]
     async fn add_evidence(
         &self,
         Parameters(args): Parameters<AddEvidenceArgs>,
     ) -> Result<String, ErrorData> {
-        Ok(self
-            .store
-            .add_evidence_file(args.kind, &args.path)
-            .map_err(bad)?
-            .to_string())
+        self.blocking("add_evidence", move |store| {
+            tools::add_evidence(store, args.kind, &args.path)
+        })
+        .await
     }
 
-    #[tool(description = "Withdraw a claim. History is kept; status becomes retracted.")]
+    #[tool(description = "Withdraw a claim. History is kept; its dependents go on hold.")]
     async fn retract(
         &self,
         Parameters(args): Parameters<RetractArgs>,
     ) -> Result<String, ErrorData> {
-        let claim = args.claim.clone();
-        self.store
-            .append(Event::Retracted {
-                claim: args.claim,
-                reason: args.reason,
-            })
-            .map_err(bad)?;
-        Ok(line(&self.store.snapshot().ledger, &claim))
+        self.blocking("retract", move |store| {
+            tools::retract(store, &args.claim, args.reason)
+        })
+        .await
     }
 }
 

@@ -1,0 +1,17 @@
+---
+source: crates/ledger-mcp/src/tools.rs
+expression: "all.join(\"\\n\")"
+---
+claim_inadmissible [claim]: memory layout needs a type name and non-zero size. Next: Fix the claim and propose it again.
+premise_unknown [0123abcd]: No claim has this id. Next: Propose the premise first, or drop it from this claim.
+evidence_unknown [0123abcd]: No evidence has this id. Next: Call add_evidence with the capture file first.
+evidence_wrong_kind [CapturedRequest]: This kind of evidence cannot check this kind of claim. Next: The claim is filed but unchecked. Propose it again with evidence of the right kind and format.
+evidence_malformed [f9060556d6f5]: The file is not in the format its kind requires. Next: The claim is filed but unchecked. Propose it again with evidence of the right kind and format.
+claim_inadmissible [claim]: signature needs endpoint, header and a hex key. Next: Fix the claim and propose it again.
+argument_missing [claim]: about=claim needs `claim`. Next: Call ask again with that argument.
+argument_missing [subject]: about=subject needs `subject`. Next: Call ask again with that argument.
+claim_unknown [0123abcd]: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
+claim_unknown [0123abcd]: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
+id_ambiguous []: More than one id starts with this. Next: Give more characters of the id.
+claim_unknown [0123abcd]: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
+evidence_unreadable [path]: No such file or directory (os error 2). Next: Check that the path is a local file this server can read.

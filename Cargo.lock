@@ -1003,11 +1003,13 @@ name = "ledger-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "insta",
  "ledger-checkers",
  "ledger-core",
  "ledger-store",
  "rmcp",
  "schemars",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

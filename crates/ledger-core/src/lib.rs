@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::NonZeroU64;
+use std::ops::Bound;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -42,6 +43,13 @@ macro_rules! hash_id {
 
             #[must_use]
             pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        // Lets maps keyed by this id be searched by a plain string, for short ids.
+        impl std::borrow::Borrow<str> for $name {
+            fn borrow(&self) -> &str {
                 &self.0
             }
         }
@@ -129,6 +137,16 @@ impl Claim {
     /// Fails only if serialization fails.
     pub fn id(&self) -> Result<ClaimId, CoreError> {
         Ok(ClaimId::of(&serde_json::to_vec(self)?))
+    }
+
+    /// What the claim is about: a type name or an endpoint.
+    #[must_use]
+    pub fn subject(&self) -> &str {
+        match &self.kind {
+            ClaimKind::MemoryLayout(m) => &m.type_name,
+            ClaimKind::RequestSignature(s) => &s.endpoint,
+            ClaimKind::ResponseSchema(r) => &r.endpoint,
+        }
     }
 
     /// Plain sentence shown to the human.
@@ -416,6 +434,42 @@ impl Ledger {
         self.evidence.get(id).copied()
     }
 
+    /// Claim ids that start with `prefix`, in id order, so callers can accept short ids.
+    pub fn claims_starting<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = &'a ClaimId> {
+        let from = (Bound::Included(prefix), Bound::Unbounded);
+        let ids = self.index.range::<str, _>(from).map(|(id, _)| id);
+        ids.take_while(move |id| id.as_str().starts_with(prefix))
+    }
+
+    /// Evidence ids that start with `prefix`, in id order.
+    pub fn evidence_starting<'a>(
+        &'a self,
+        prefix: &'a str,
+    ) -> impl Iterator<Item = &'a EvidenceId> {
+        let from = (Bound::Included(prefix), Bound::Unbounded);
+        let ids = self.evidence.range::<str, _>(from).map(|(id, _)| id);
+        ids.take_while(move |id| id.as_str().starts_with(prefix))
+    }
+
+    /// Claims that rest on `id`, directly or through other claims, in proposal order.
+    /// These are the claims put on hold if `id` stops holding.
+    #[must_use]
+    pub fn dependents(&self, id: &ClaimId) -> Vec<&ClaimId> {
+        let Some(&root) = self.index.get(id) else {
+            return Vec::new();
+        };
+        let mut affected = vec![false; self.entries.len()];
+        affected[root] = true;
+        let mut dependents = Vec::new();
+        for (at, entry) in self.entries.iter().enumerate().skip(root + 1) {
+            if entry.premises.iter().any(|&p| affected[p]) {
+                affected[at] = true;
+                dependents.push(&entry.id);
+            }
+        }
+        dependents
+    }
+
     /// Derived from verdicts and premises. Settles the claim's premise closure
     /// once each, in dependency order, so shared premises cost nothing extra.
     #[must_use]
@@ -597,6 +651,12 @@ mod tests {
             })?;
         }
         assert_eq!(l.status(&ids[199]), Some(Status::Held));
+        assert_eq!(l.dependents(&ids[0]).len(), 199);
+        assert_eq!(l.dependents(&ids[198]), [&ids[199]]);
+        let short = &ids[7].as_str()[..12];
+        assert_eq!(l.claims_starting(short).collect::<Vec<_>>(), [&ids[7]]);
+        assert_eq!(l.claims_starting("").count(), 200);
+        assert_eq!(l.claims_starting("not hex").count(), 0);
         l.apply(Event::Retracted {
             claim: ids[0].clone(),
             reason: String::new(),

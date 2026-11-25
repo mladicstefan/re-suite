@@ -1,0 +1,70 @@
+---
+source: crates/ledger-mcp/src/tools.rs
+expression: log
+---
+add_evidence
+seq 1
+evidence 1a541fc8f6f7
+
+propose Player (32 bytes) with the snapshot
+seq 3
+held         928dadedfb4d  `Player` is 32 bytes with 0 fields ().
+
+propose it again: a no-op
+seq 3
+held         928dadedfb4d  `Player` is 32 bytes with 0 fields ().
+
+propose Boss (64 bytes) with the snapshot: refuted
+seq 5
+refuted      ac297824d0dc  `Boss` is 64 bytes with 0 fields ().
+refuted by 1a541fc8f6f7: snapshot is 32 bytes, `Boss` needs 64
+
+propose Pet resting on Player
+seq 6
+unchecked    65c014ce906b  `Pet` is 8 bytes with 0 fields ().
+
+propose Minion resting on Boss: refused
+REJECTED premise_refuted [ac297824d0dc]: This premise has a counterexample. Next: Do not build on it. Use explain to see the counterexample.
+
+ask about=affected claim=Player
+seq 6
+unchecked    65c014ce906b  `Pet` is 8 bytes with 0 fields ().
+end
+
+retract Player
+seq 7
+retracted    928dadedfb4d  `Player` is 32 bytes with 0 fields ().
+dependents now on hold: 1
+
+ask about=on_hold
+seq 7
+on_hold      65c014ce906b  `Pet` is 8 bytes with 0 fields ().  [waiting on 928dadedfb4d (retracted)]
+end
+
+ask about=subject subject=Boss
+seq 7
+refuted      ac297824d0dc  `Boss` is 64 bytes with 0 fields ().
+end
+
+ask about=claim claim=Pet
+seq 7
+on_hold      65c014ce906b  `Pet` is 8 bytes with 0 fields ().
+
+explain Boss
+seq 7
+refuted      ac297824d0dc  `Boss` is 64 bytes with 0 fields ().
+refuted by 1a541fc8f6f7: snapshot is 32 bytes, `Boss` needs 64
+
+explain Pet
+seq 7
+on_hold      65c014ce906b  `Pet` is 8 bytes with 0 fields ().
+waiting on 928dadedfb4d (retracted)
+premise: retracted    928dadedfb4d  `Player` is 32 bytes with 0 fields ().
+no checks yet: propose it again with evidence to replay it
+
+ask about=all
+seq 7
+retracted    928dadedfb4d  `Player` is 32 bytes with 0 fields ().
+refuted      ac297824d0dc  `Boss` is 64 bytes with 0 fields ().
+on_hold      65c014ce906b  `Pet` is 8 bytes with 0 fields ().
+end
