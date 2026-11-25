@@ -88,9 +88,15 @@ impl LedgerServer {
                     .evidence(e)
                     .map_err(bad)?
                     .ok_or_else(|| bad(format!("missing bytes for {e}")))?;
-                raw.push((e.clone(), k, bytes.to_vec()));
+                raw.push((e.clone(), k, bytes));
             }
-            let verdict = ledger_checkers::check_claim(&kind, raw).map_err(bad)?;
+            let borrowed: Vec<_> = raw
+                .iter()
+                .map(|(e, k, b)| (e.clone(), *k, &b[..]))
+                .collect();
+            let limit = std::time::Duration::from_secs(5);
+            let verdict =
+                ledger_checkers::check_claim(&id, &kind, &borrowed, limit).map_err(bad)?;
             let evidence = args.evidence.into_iter().collect();
             self.store
                 .append(Event::Checked {
