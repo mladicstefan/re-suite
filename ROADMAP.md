@@ -255,6 +255,16 @@ checks and 10 s for solver checks, both configurable per claim kind.
 - Any derived state on disk (snapshots, caches, indexes) can be deleted
   and rebuilt from the log.
 
+**Code structure**
+
+- Values that can be fixed at compile time are: `const` items and
+  `const fn` are preferred over run-time computation and over macros.
+- Every feature that depends on the operating system lives in a crate of
+  its own. That crate selects the system's functions at compile time and
+  exposes one portable API; no other crate calls the system directly.
+- IO is never skipped or deferred: blocking work stays off the async
+  executor, and no shortcut is taken on IO, durability or concurrency.
+
 **Safety**
 
 - Evidence is untrusted input. Parsing it must never panic, and every

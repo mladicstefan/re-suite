@@ -42,8 +42,8 @@ macro_rules! hash_id {
             }
 
             #[must_use]
-            pub fn as_str(&self) -> &str {
-                &self.0
+            pub const fn as_str(&self) -> &str {
+                self.0.as_str()
             }
         }
 
@@ -141,11 +141,11 @@ impl Claim {
 
     /// What the claim is about: a type name or an endpoint.
     #[must_use]
-    pub fn subject(&self) -> &str {
+    pub const fn subject(&self) -> &str {
         match &self.kind {
-            ClaimKind::MemoryLayout(m) => &m.type_name,
-            ClaimKind::RequestSignature(s) => &s.endpoint,
-            ClaimKind::ResponseSchema(r) => &r.endpoint,
+            ClaimKind::MemoryLayout(m) => m.type_name.as_str(),
+            ClaimKind::RequestSignature(s) => s.endpoint.as_str(),
+            ClaimKind::ResponseSchema(r) => r.endpoint.as_str(),
         }
     }
 
@@ -184,7 +184,7 @@ impl Claim {
 pub struct WellFormed<T>(T);
 
 impl<T> WellFormed<T> {
-    pub fn get(&self) -> &T {
+    pub const fn get(&self) -> &T {
         &self.0
     }
 }

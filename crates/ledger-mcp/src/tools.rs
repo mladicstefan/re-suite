@@ -172,7 +172,7 @@ fn find_claim(ledger: &Ledger, text: &str) -> Result<ClaimId, Rejection> {
     only(ledger.claims_starting(text), text, unknown_claim).cloned()
 }
 
-fn word(status: Status) -> &'static str {
+const fn word(status: Status) -> &'static str {
     match status {
         Status::Unchecked => "unchecked",
         Status::Held => "held",

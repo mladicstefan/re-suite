@@ -48,6 +48,28 @@ Every new `ClaimKind` variant needs all four, in the same change:
 ## Checkers are offline
 - Checkers replay saved evidence only. Never send anything to a live target.
 
+## Compile time first
+- Prefer `const` items and `const fn` over values computed at run time, and
+  over macros wherever a `const fn`, an associated const or a generic can say
+  the same thing.
+- Limits, versions and ids are named constants, never repeated literals.
+- Before finishing a change, run
+  `cargo clippy --workspace --all-targets -- -W clippy::missing_const_for_fn`
+  and make what it lists `const`.
+
+## OS-dependent code lives in its own crate
+- Anything that differs by operating system (memory mapping, file locking,
+  flush calls, process and memory limits, sandboxing) goes in a crate of its
+  own, never inline in the core, the store, the checkers or the server.
+- That crate selects the system's functions at compile time with `#[cfg(...)]`
+  and exposes one portable API. No run-time checks of the operating system.
+
+## IO is never skipped
+- Blocking work (SQLite, hashing, file IO, checks) never runs on the async
+  executor: hand it to the blocking pool or use async IO.
+- Do not put off IO, durability or concurrency work behind a `shortcut:`
+  comment, even where existing code did.
+
 ## Dependencies
 - Add with `cargo add -p <crate> <dep>`; never write or edit a version in a
   `Cargo.toml` by hand. Commit `Cargo.lock`.
