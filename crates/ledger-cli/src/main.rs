@@ -15,10 +15,9 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let ledger = ledger_store::replay(&args.ledger)
-        .with_context(|| format!("opening {}", args.ledger.display()))?;
-    for (id, claim) in ledger.claims() {
-        let status: ledger_core::Status =
-            ledger.status(id).context("claim vanished during listing")?;
+        .with_context(|| format!("opening {}", args.ledger.display()))?
+        .ledger;
+    for ((id, claim), (_, status)) in ledger.claims().zip(ledger.statuses()) {
         println!("{status:?}\t{id}\t{}", claim.sentence());
     }
     Ok(())

@@ -66,7 +66,7 @@ fn no_code_rewrites_the_event_log() -> std::io::Result<()> {
 fn sqlite_refuses_to_rewrite_the_event_log() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let db = dir.path().join("l.db");
-    Store::open(&db)?.add_evidence(EvidenceKind::MemorySnapshot, vec![1])?;
+    Store::open(&db)?.add_evidence(EvidenceKind::MemorySnapshot, &[1])?;
     let conn = rusqlite::Connection::open(&db)?;
     assert!(
         conn.execute("UPDATE events SET recorded_at = ''", [])

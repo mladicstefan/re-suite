@@ -76,7 +76,8 @@ impl LedgerServer {
         let kind = claim.get().kind.clone();
         self.store.append(Event::Proposed { claim }).map_err(bad)?;
         if !args.evidence.is_empty() {
-            let ledger = self.store.ledger().map_err(bad)?;
+            let snapshot = self.store.snapshot();
+            let ledger = &snapshot.ledger;
             let mut raw = Vec::new();
             for e in &args.evidence {
                 let k = ledger
@@ -87,7 +88,7 @@ impl LedgerServer {
                     .evidence(e)
                     .map_err(bad)?
                     .ok_or_else(|| bad(format!("missing bytes for {e}")))?;
-                raw.push((e.clone(), k, bytes));
+                raw.push((e.clone(), k, bytes.to_vec()));
             }
             let verdict = ledger_checkers::check_claim(&kind, raw).map_err(bad)?;
             let evidence = args.evidence.into_iter().collect();
@@ -99,17 +100,18 @@ impl LedgerServer {
                 })
                 .map_err(bad)?;
         }
-        Ok(line(&self.store.ledger().map_err(bad)?, &id))
+        Ok(line(&self.store.snapshot().ledger, &id))
     }
 
     #[tool(description = "Status and sentence for one claim, or for all claims.")]
     async fn ask(&self, Parameters(args): Parameters<AskArgs>) -> Result<String, ErrorData> {
-        let ledger = self.store.ledger().map_err(bad)?;
+        let snapshot = self.store.snapshot();
+        let ledger = &snapshot.ledger;
         Ok(match args.claim {
-            Some(id) => line(&ledger, &id),
+            Some(id) => line(ledger, &id),
             None => ledger
                 .claims()
-                .map(|(id, _)| line(&ledger, id))
+                .map(|(id, _)| line(ledger, id))
                 .collect::<Vec<_>>()
                 .join("\n"),
         })
@@ -120,13 +122,14 @@ impl LedgerServer {
         &self,
         Parameters(args): Parameters<ExplainArgs>,
     ) -> Result<String, ErrorData> {
-        let ledger = self.store.ledger().map_err(bad)?;
+        let snapshot = self.store.snapshot();
+        let ledger = &snapshot.ledger;
         let claim = ledger
             .claim(&args.claim)
             .ok_or_else(|| bad(format!("unknown claim {}", args.claim)))?;
-        let mut out = line(&ledger, &args.claim);
+        let mut out = line(ledger, &args.claim);
         for p in &claim.premises {
-            let _ = write!(out, "\npremise: {}", line(&ledger, p));
+            let _ = write!(out, "\npremise: {}", line(ledger, p));
         }
         for v in ledger.verdicts(&args.claim) {
             let _ = match v {
@@ -166,7 +169,7 @@ impl LedgerServer {
                 reason: args.reason,
             })
             .map_err(bad)?;
-        Ok(line(&self.store.ledger().map_err(bad)?, &claim))
+        Ok(line(&self.store.snapshot().ledger, &claim))
     }
 }
 

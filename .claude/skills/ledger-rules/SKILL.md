@@ -17,7 +17,7 @@ These are invariants, not style. A change that breaks one is wrong even if CI pa
 - `ClaimId` and `EvidenceId` are blake3 hashes of canonical content
   (`ClaimId::of`, `EvidenceId::of`, `Claim::id`).
 - Never mint random, sequential or time-based IDs for them. No uuid.
-- Timestamps may be stored on events (ledger-store `at` column) but never
+- Timestamps may be stored on events (ledger-store `recorded_at` column) but never
   enter a hash.
 - Use `BTreeMap`/`BTreeSet` in hashed types so canonical JSON is deterministic.
 
