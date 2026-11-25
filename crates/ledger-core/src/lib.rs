@@ -650,6 +650,14 @@ pub enum Verdict {
     Inconclusive { reason: String },
 }
 
+/// Which checker produced a verdict. Together with the claim and the evidence
+/// the check read, this identifies the check: the same three give the same verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CheckerRef {
+    pub id: String,
+    pub version: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
@@ -664,6 +672,9 @@ pub enum Event {
         claim: ClaimId,
         evidence: BTreeSet<EvidenceId>,
         verdict: Verdict,
+        /// Which checker ran. Absent in events written before checks were cached.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checker: Option<CheckerRef>,
     },
     Retracted {
         claim: ClaimId,
@@ -704,6 +715,8 @@ struct Entry {
     /// Positions of the premises in `Ledger::entries`, each smaller than this entry's own.
     premises: Vec<usize>,
     verdicts: Vec<Verdict>,
+    /// For each verdict, in step with `verdicts`: the evidence its check read and the checker.
+    checks: Vec<(BTreeSet<EvidenceId>, Option<CheckerRef>)>,
     retracted: bool,
 }
 
@@ -759,6 +772,7 @@ impl Ledger {
                     claim,
                     premises,
                     verdicts: Vec::new(),
+                    checks: Vec::new(),
                     retracted: false,
                 });
             }
@@ -769,12 +783,14 @@ impl Ledger {
                 claim,
                 evidence,
                 verdict,
+                checker,
             } => {
                 let at = self.position(&claim)?;
                 if let Some(e) = evidence.iter().find(|e| !self.evidence.contains_key(*e)) {
                     return Err(CoreError::UnknownEvidence(e.clone()));
                 }
                 self.entries[at].verdicts.push(verdict);
+                self.entries[at].checks.push((evidence, checker));
             }
             Event::Retracted { claim, .. } => {
                 let at = self.position(&claim)?;
@@ -805,6 +821,23 @@ impl Ledger {
     #[must_use]
     pub fn verdicts(&self, id: &ClaimId) -> &[Verdict] {
         self.entry(id).map_or(&[], |e| &e.verdicts)
+    }
+
+    /// The verdict already recorded for exactly this check, if there is one: the same
+    /// claim, the same evidence and the same checker at the same version. The latest wins.
+    #[must_use]
+    pub fn checked(
+        &self,
+        claim: &ClaimId,
+        evidence: &BTreeSet<EvidenceId>,
+        checker: &CheckerRef,
+    ) -> Option<&Verdict> {
+        let entry = self.entry(claim)?;
+        let same = |(read, by): &&(BTreeSet<EvidenceId>, Option<CheckerRef>)| {
+            read == evidence && by.as_ref() == Some(checker)
+        };
+        let at = entry.checks.iter().rposition(|check| same(&check))?;
+        entry.verdicts.get(at)
     }
 
     #[must_use]
@@ -1164,9 +1197,43 @@ mod tests {
             claim: base_id.clone(),
             evidence: [ev].into(),
             verdict: held,
+            checker: None,
         })?;
         assert_eq!(l.status(&base_id), Some(Status::Held));
         assert_eq!(l.status(&dep_id), Some(Status::Unchecked));
+
+        // A check is found again by its claim, its evidence and its checker at that version.
+        let by = |version| CheckerRef {
+            id: "memory_layout".into(),
+            version,
+        };
+        let read: BTreeSet<EvidenceId> = [EvidenceId::of(b"snapshot")].into();
+        assert_eq!(
+            l.checked(&base_id, &read, &by(1)),
+            None,
+            "recorded without a checker"
+        );
+        let second = Verdict::Inconclusive {
+            reason: "second look".into(),
+        };
+        l.apply(Event::Checked {
+            claim: base_id.clone(),
+            evidence: read.clone(),
+            verdict: second.clone(),
+            checker: Some(by(1)),
+        })?;
+        assert_eq!(l.checked(&base_id, &read, &by(1)), Some(&second));
+        assert_eq!(
+            l.checked(&base_id, &read, &by(2)),
+            None,
+            "another version is another check"
+        );
+        assert_eq!(
+            l.checked(&base_id, &BTreeSet::new(), &by(1)),
+            None,
+            "other evidence"
+        );
+        assert_eq!(l.checked(&dep_id, &read, &by(1)), None, "another claim");
 
         l.apply(Event::Retracted {
             claim: base_id,
@@ -1258,6 +1325,7 @@ mod tests {
                 verdict: Verdict::Held {
                     runs: NonZeroU64::MIN,
                 },
+                checker: None,
             })?;
         }
         assert_eq!(l.status(&ids[199]), Some(Status::Held));
@@ -1303,7 +1371,7 @@ mod tests {
                     _ => None,
                 };
                 if let Some(verdict) = verdict {
-                    l.apply(Event::Checked { claim: id.clone(), evidence: BTreeSet::new(), verdict })?;
+                    l.apply(Event::Checked { claim: id.clone(), evidence: BTreeSet::new(), verdict, checker: None, })?;
                 }
                 if *fate == 4 {
                     l.apply(Event::Retracted { claim: id, reason: String::new() })?;

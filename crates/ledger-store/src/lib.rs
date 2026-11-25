@@ -555,6 +555,7 @@ mod tests {
             claim,
             evidence: [].into(),
             verdict,
+            checker: None,
         }
     }
 
@@ -936,6 +937,7 @@ mod tests {
                         claim: id(n, p).ok()?,
                         evidence: evidence.iter().map(|e| EvidenceId::of(&[*e])).collect(),
                         verdict,
+                        checker: None,
                     })
                 }
             ),

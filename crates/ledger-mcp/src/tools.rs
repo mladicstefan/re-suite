@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
 use std::time::Duration;
 
-use ledger_checkers::{CheckError, check_claim};
+use ledger_checkers::{CheckError, check_claim, checker_of};
 use ledger_core::{
     Body, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event, EvidenceId, EvidenceKind, Header,
     HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict, admit,
@@ -284,22 +284,34 @@ pub fn propose(store: &Store, mut claim: Claim, evidence: &[String]) -> Result<S
     tracing::info!(claim = %id, "proposing");
     store.append(Event::Proposed { claim })?;
 
+    let mut reused = false;
     if !evidence.is_empty() {
-        let mut mapped = Vec::with_capacity(evidence.len());
-        for e in &evidence {
-            let unknown = || unknown_evidence(e.as_str());
-            let kind = ledger.evidence_kind(e).ok_or_else(unknown)?;
-            mapped.push((e.clone(), kind, store.evidence(e)?.ok_or_else(unknown)?));
+        // A check is the same check if the claim, the evidence it reads and the checker's
+        // version are the same; its recorded verdict then stands and nothing is replayed.
+        // An inconclusive verdict is not reused: it may only have run out of time.
+        let checker = checker_of(&kind);
+        let read: BTreeSet<EvidenceId> = evidence.iter().cloned().collect();
+        let recorded = store.snapshot();
+        let known = recorded.ledger.checked(&id, &read, &checker);
+        reused = known.is_some_and(|v| !matches!(v, Verdict::Inconclusive { .. }));
+        if !reused {
+            let mut mapped = Vec::with_capacity(evidence.len());
+            for e in &evidence {
+                let unknown = || unknown_evidence(e.as_str());
+                let kind = ledger.evidence_kind(e).ok_or_else(unknown)?;
+                mapped.push((e.clone(), kind, store.evidence(e)?.ok_or_else(unknown)?));
+            }
+            let raw: Vec<_> = (mapped.iter())
+                .map(|(e, kind, bytes)| (e.clone(), *kind, &bytes[..]))
+                .collect();
+            let verdict = check_claim(&id, &kind, &raw, CHECK_LIMIT)?;
+            store.append(Event::Checked {
+                claim: id.clone(),
+                evidence: read,
+                verdict,
+                checker: Some(checker),
+            })?;
         }
-        let raw: Vec<_> = (mapped.iter())
-            .map(|(e, kind, bytes)| (e.clone(), *kind, &bytes[..]))
-            .collect();
-        let verdict = check_claim(&id, &kind, &raw, CHECK_LIMIT)?;
-        store.append(Event::Checked {
-            claim: id.clone(),
-            evidence: evidence.into_iter().collect(),
-            verdict,
-        })?;
     }
     let after = store.snapshot();
     let mut out = row_of(&after.ledger, &id);
@@ -310,6 +322,9 @@ pub fn propose(store: &Store, mut claim: Claim, evidence: &[String]) -> Result<S
             short(c.evidence.as_str()),
             c.detail
         );
+    }
+    if reused {
+        out.push_str("\nalready checked on exactly this evidence; not replayed");
     }
     Ok(stamp(&after, &out))
 }
@@ -722,9 +737,13 @@ mod tests {
         );
         let boss = say(
             "propose Boss (64 bytes) with the snapshot: refuted",
-            propose(&store, layout("Boss", 64, &[])?, &[ev]),
+            propose(&store, layout("Boss", 64, &[])?, std::slice::from_ref(&ev)),
         );
         let boss = id_in(&boss).to_owned();
+        say(
+            "propose Boss again with the same snapshot: the verdict stands, nothing is replayed",
+            propose(&store, layout("Boss", 64, &[])?, &[ev]),
+        );
         let pet = say(
             "propose Pet resting on Player",
             propose(&store, layout("Pet", 8, &[&player])?, &[]),

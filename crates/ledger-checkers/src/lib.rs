@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
 use ledger_core::{
-    Body, ClaimId, ClaimKind, Counterexample, Endpoint, EvidenceId, EvidenceKind, FieldKind,
-    HttpExchange, HttpRequest, MemoryLayout, RequestSignature, ResponseSchema, SigAlgorithm,
-    SigEncoding, SignedPart, Verdict,
+    Body, CheckerRef, ClaimId, ClaimKind, Counterexample, Endpoint, EvidenceId, EvidenceKind,
+    FieldKind, HttpExchange, HttpRequest, MemoryLayout, RequestSignature, ResponseSchema,
+    SigAlgorithm, SigEncoding, SignedPart, Verdict,
 };
 use md5::Digest as _;
 use rayon::prelude::*;
@@ -433,6 +433,21 @@ fn about(
         return Err(CheckError::NotApplicable(item.id.clone(), what));
     }
     Ok(evidence)
+}
+
+/// The checker that `check_claim` runs for a claim, by id and version. With the
+/// claim and the evidence, this is what a recorded verdict is cached on.
+#[must_use]
+pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
+    let (id, version) = match claim {
+        ClaimKind::MemoryLayout(_) => (MemoryLayoutChecker::ID, MemoryLayoutChecker::VERSION),
+        ClaimKind::RequestSignature(_) => (SignatureChecker::ID, SignatureChecker::VERSION),
+        ClaimKind::ResponseSchema(_) => (SchemaChecker::ID, SchemaChecker::VERSION),
+    };
+    CheckerRef {
+        id: id.to_owned(),
+        version,
+    }
 }
 
 /// Saved evidence as stored: its id, its declared kind and its bytes.

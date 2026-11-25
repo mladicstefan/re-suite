@@ -61,6 +61,7 @@ fn held(claim: &ClaimId) -> Event {
         verdict: Verdict::Held {
             runs: NonZeroU64::MIN,
         },
+        checker: None,
     }
 }
 

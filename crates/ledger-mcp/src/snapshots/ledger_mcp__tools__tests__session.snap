@@ -19,6 +19,12 @@ seq 5
 refuted      ac297824d0dc  `Boss` is 64 bytes.
 refuted by 1a541fc8f6f7: snapshot is 32 bytes, `Boss` needs 64
 
+propose Boss again with the same snapshot: the verdict stands, nothing is replayed
+seq 5
+refuted      ac297824d0dc  `Boss` is 64 bytes.
+refuted by 1a541fc8f6f7: snapshot is 32 bytes, `Boss` needs 64
+already checked on exactly this evidence; not replayed
+
 propose Pet resting on Player
 seq 6
 unchecked    65c014ce906b  `Pet` is 8 bytes.
