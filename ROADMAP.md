@@ -164,35 +164,43 @@ These rules are fixed. How they are implemented is not.
 ### Measured baseline
 
 Measured on 25 November 2026 with the benchmark in `ledger-bench`
-(`cargo run --release`), on a 2-core cloud VM with 7 GB of memory. Events
-were about 190 bytes of JSON. Seven writers and seven readers ran at once.
+(`cargo run --release -p ledger-bench`), on an 8-core Ryzen 7 3700X with
+46 GB of memory and an NVMe SSD under btrfs on dm-crypt, where one
+`fdatasync` takes 6.2 ms at the median. Events were about 190 bytes of
+JSON, about 290 with a premise. Seven writers and seven readers ran at
+once, on a ledger of 100,000 claims.
 
 | Scenario | Result |
 | --- | --- |
-| 7 agents, each waiting for a durable write (group commit, `synchronous=FULL`) | 5,049 events/s; write latency p50 0.50 ms, p99 9.4 ms |
-| Same, `synchronous=NORMAL` | 15,659 events/s; p50 0.06 ms, p99 6.5 ms |
-| Same, one transaction per event (no group commit) | 961 events/s; p50 5.7 ms, p99 23.2 ms |
-| Point reads while writing, 7 readers | 0.6 to 1.5 million reads/s in total; p99 under 60 microseconds |
-| Bulk import, batches of 512 | 222,952 events/s |
-| Replay: read and parse the log | 922,294 events/s (700,000 events in 0.76 s) |
-| Database size | 151 MB for 700,000 events |
-| Core: hash, admit and apply a claim | 364,651 claims/s |
-| Status of 1,000,000 claims, one pass in dependency order | 6.8 ms |
-| Status by plain recursion over 35 chained diamond dependencies | 24 million calls, 48 ms, and about 11 times more for every 5 further levels |
+| 7 agents, each waiting for a durable write (group commit, `synchronous=FULL`) | 961 events/s; write latency p50 7.2 ms, p99 12.6 ms |
+| Same, `synchronous=NORMAL` | 21,320 events/s; p50 0.26 ms, p99 0.37 ms |
+| Same, one transaction per event (no group commit) | 151 events/s; p50 6.6 ms, p99 760 ms |
+| Status of one claim while writing, 7 readers | 4.1 million reads/s in total; p99 2.8 microseconds |
+| Bulk import, batches of 512, `synchronous=NORMAL` | 74,851 events/s |
+| Cold start by replay: read, parse, admit and apply the log | 200,643 events/s (1,000,000 events in 4.98 s, 100,000 in 0.44 s) |
+| Database size | 293 MB for 1,000,000 events |
+| Core: hash, admit and apply a claim | 274,059 claims/s |
+| Status of 1,000,000 claims, one pass in dependency order | 16.1 ms |
+| One page of a claim list (200 rows) at 100,000 claims, last page | 4.7 ms |
+| Status by plain recursion over 35 chained diamond dependencies | 24 million calls, 1.6 s, and about 11 times more for every 5 further levels; the core settles the same claim in 11 microseconds |
 
 What the baseline shows:
 
-- The load we expect (7 agents, thousands of queries) is far below what
-  one writer and SQLite handle. The ledger is not the bottleneck; checks
-  are.
-- Group commit is worth about 5 times the throughput and 11 times the
-  median latency. It is required, not an optimisation.
+- Reads, replay and status are far inside their budgets. The ledger is
+  not the bottleneck for them; checks are.
+- Durable writes cost one disk flush per commit, whatever the software
+  does. On this disk that is 6.2 ms, so the 2 ms median budget cannot be
+  met here (see the open questions). On tmpfs, where a flush is free, the
+  same code has a median of 0.26 ms.
+- Group commit is worth about 6 times the throughput and 60 times the
+  p99 latency. It is required, not an optimisation.
 - Plain recursion for status is exponential on shared premises. Status
   must be computed in dependency order or incrementally.
 
-Caveat: a cloud VM's disk can acknowledge flushes faster than a laptop
-SSD. Re-run the benchmark on the target machine before trusting the write
-figures.
+The first baseline, on a 2-core cloud VM whose disk acknowledged flushes
+in well under a millisecond, gave 5,049 durable events/s at a median of
+0.50 ms. Re-run the benchmark whenever the ledger moves to another disk
+or filesystem.
 
 ### Budgets
 
@@ -296,11 +304,11 @@ Tick a box only when its "done when" line is true.
 
 ### Phase 0: Setup
 
-- [ ] Workspace, crates, toolchain, lints, CI script
-- [ ] Agent tooling: one Rust skill pack, language-server plugin, project
+- [x] Workspace, crates, toolchain, lints, CI script
+- [x] Agent tooling: one Rust skill pack, language-server plugin, project
       rules skill, hooks
-- [ ] Core crate seeded from the existing type sketch, tests passing
-- [ ] Benchmark crate in the workspace, reproducing the baseline table
+- [x] Core crate seeded from the existing type sketch, tests passing
+- [x] Benchmark crate in the workspace, reproducing the baseline table
 
 Done when a clean checkout builds and passes CI with no warnings.
 
@@ -460,6 +468,7 @@ honestly.
 | Which anchor survives real version changes with the fewest false matches? | Phase 2, version reruns |
 | How much of x86-64 and AArch64 does RzIL lift, and how often does it disagree with a second lifter? | End of Phase 2 |
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
+| One flush on the current disk (btrfs on dm-crypt) takes 6.2 ms, so durable `propose` has a 7.2 ms median against the 2 ms budget, and 961 events/s against 1,000. Move the ledger to a filesystem with faster flushes, relax the budget for this machine, or allow `synchronous=NORMAL` for interactive writes? | Before the Phase 1 Store box is ticked |
 | How far does VerifiedIDA's standard overlap, and should we build on it or interoperate? | Before the open format in Phase 6 |
 
 ## 14. Rules for whoever implements a milestone

@@ -14,6 +14,7 @@ target; all checks replay captures.
 - `crates/ledger-checkers`: offline checkers behind the `Checker` trait.
 - `crates/ledger-mcp`: stdio MCP server (propose, ask, explain, add_evidence, retract). Only crate with tokio.
 - `crates/ledger-cli`: prints claims with status from a ledger file.
+- `crates/ledger-bench`: `cargo run --release -p ledger-bench` checks the ROADMAP.md budgets.
 
 ## Checks
 - Full CI: `scripts/ci.sh` (fmt, clippy -D warnings, nextest, doctests, cargo deny, cargo machete).

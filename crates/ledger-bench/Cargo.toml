@@ -1,0 +1,13 @@
+[package]
+name = "ledger-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ledger-core = { version = "0.1.0", path = "../ledger-core" }
+ledger-store = { version = "0.1.0", path = "../ledger-store" }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+
+[lints]
+workspace = true

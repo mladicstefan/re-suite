@@ -17,6 +17,7 @@ Toolchain: Rust 1.100.0 (pinned in `rust-toolchain.toml`), edition 2024, resolve
 | `ledger-checkers` | Offline checkers behind one `Checker` trait: memory layout over snapshots, signature replay over captured requests, JSON Schema over captured exchanges. |
 | `ledger-mcp` | MCP server over stdio with five tools: `propose`, `ask`, `explain`, `add_evidence`, `retract`. Input schemas come from ledger-core types via schemars. The only crate with tokio. |
 | `ledger-cli` | `ledger-cli <file>` prints every claim with its status. |
+| `ledger-bench` | `cargo run --release -p ledger-bench` reproduces the baseline table in ROADMAP.md and exits non-zero if a budget is broken. |
 
 ## Resolved dependency versions
 
@@ -29,6 +30,7 @@ From `cargo tree -p <crate> --depth 1`:
 | `ledger-checkers` | base64 0.23.1, hex 0.4.3, hmac 0.13.0, jsonschema 0.63.1 (no default features), ledger-core (path), md-5 0.11.0, rayon 1.12.0, serde_json 1.0.154, sha1 0.11.0, sha2 0.11.2, thiserror 2.0.21 | – |
 | `ledger-mcp` | anyhow 1.0.105, ledger-checkers (path), ledger-core (path), ledger-store (path), rmcp 3.11.0 (server, macros, transport-io), schemars 1.2.3, tokio 1.54.1 (rt, macros, io-std), tracing 0.1.44, tracing-subscriber 0.3.23 | – |
 | `ledger-cli` | anyhow 1.0.105, clap 4.6.10, ledger-store (path) | – |
+| `ledger-bench` | ledger-core (path), ledger-store (path), rusqlite 0.43.0 (bundled) | – |
 
 ## Running
 
