@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
 use ledger_core::{
-    CapturedExchange, CapturedRequest, ClaimId, ClaimKind, Counterexample, EvidenceId,
-    EvidenceKind, FieldKind, MemoryLayout, RequestSignature, ResponseSchema, SigAlgorithm,
-    SigEncoding, Verdict,
+    Body, ClaimId, ClaimKind, Counterexample, Endpoint, EvidenceId, EvidenceKind, FieldKind,
+    HttpExchange, MemoryLayout, RequestSignature, ResponseSchema, SigAlgorithm, SigEncoding,
+    Verdict,
 };
 use md5::Digest as _;
 use rayon::prelude::*;
@@ -20,6 +20,8 @@ pub enum CheckError {
     WrongEvidence(EvidenceKind),
     #[error("malformed evidence {0}: {1}")]
     Malformed(EvidenceId, String),
+    #[error("evidence {0} is {1}, which the claim says nothing about")]
+    NotApplicable(EvidenceId, String),
     #[error("evidence {0} is {1} bytes, over the {2} byte limit for its format")]
     TooLarge(EvidenceId, usize, usize),
     #[error("invalid claim: {0}")]
@@ -229,24 +231,26 @@ pub struct SignatureChecker;
 
 impl Checker<'_> for SignatureChecker {
     const ID: &'static str = "request_signature";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     type Claim = RequestSignature;
-    type Evidence = CapturedRequest;
+    type Evidence = HttpExchange;
 
     fn check(
         &self,
         claim: &RequestSignature,
-        evidence: &[Item<CapturedRequest>],
+        evidence: &[Item<HttpExchange>],
         deadline: Instant,
     ) -> Result<Verdict, CheckError> {
         let key =
             hex::decode(&claim.key_hex).map_err(|e| CheckError::InvalidClaim(e.to_string()))?;
-        Ok(replay(evidence, deadline, |req| {
+        Ok(replay(evidence, deadline, |exchange| {
+            let req = &exchange.request;
             // Header names are case-insensitive in HTTP, and HTTP/2 captures have them in lower case.
-            let (_, got) = (req.headers.iter())
-                .find(|(name, _)| name.eq_ignore_ascii_case(&claim.header))
+            let got = (req.headers.iter())
+                .find(|h| h.name.eq_ignore_ascii_case(&claim.header))
+                .map(|h| &h.value)
                 .ok_or_else(|| format!("header `{}` missing", claim.header))?;
-            let mac = sign(claim.algorithm, &key, req.body.as_bytes())?;
+            let mac = sign(claim.algorithm, &key, &body_bytes(req.body.as_ref())?)?;
             // Hex digits may be in either case; in base64 case is part of the value.
             let (want, same) = match claim.encoding {
                 SigEncoding::Hex => {
@@ -293,23 +297,79 @@ pub struct SchemaChecker;
 
 impl Checker<'_> for SchemaChecker {
     const ID: &'static str = "response_schema";
-    const VERSION: u32 = 1;
+    const VERSION: u32 = 2;
     type Claim = ResponseSchema;
-    type Evidence = CapturedExchange;
+    type Evidence = HttpExchange;
 
     fn check(
         &self,
         claim: &ResponseSchema,
-        evidence: &[Item<CapturedExchange>],
+        evidence: &[Item<HttpExchange>],
         deadline: Instant,
     ) -> Result<Verdict, CheckError> {
         let v = jsonschema::validator_for(&claim.schema)
             .map_err(|e| CheckError::InvalidClaim(e.to_string()))?;
-        Ok(replay(evidence, deadline, |ex| {
-            v.validate(&ex.response)
-                .map_err(|e| format!("{e} at {}", e.instance_path()))
+        Ok(replay(evidence, deadline, |exchange| {
+            let body = exchange.response.as_ref().and_then(|r| r.body.as_ref());
+            let body = body.ok_or("the response has no body")?;
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes(Some(body))?)
+                .map_err(|e| format!("the response body is not JSON: {e}"))?;
+            v.validate(&json)
+                .map_err(|e| match e.instance_path().as_str() {
+                    "" => format!("{e} at the top level"),
+                    path => format!("{e} at {path}"),
+                })
         }))
     }
+}
+
+/// A captured body as bytes; no body is no bytes.
+fn body_bytes(body: Option<&Body>) -> Result<std::borrow::Cow<'_, [u8]>, String> {
+    match body {
+        None => Ok((&[][..]).into()),
+        Some(Body::Text(text)) => Ok(text.as_bytes().into()),
+        Some(Body::Base64(encoded)) => base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map(Into::into)
+            .map_err(|e| format!("body is not valid base64: {e}")),
+    }
+}
+
+/// Parses one stored HTTP exchange and makes sure its bodies decode.
+fn http_exchange(bytes: &[u8]) -> Result<HttpExchange, String> {
+    let exchange: HttpExchange = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    body_bytes(exchange.request.body.as_ref())?;
+    body_bytes(exchange.response.as_ref().and_then(|r| r.body.as_ref()))?;
+    Ok(exchange)
+}
+
+/// Refuses captures the claim says nothing about: another endpoint, or for a
+/// response claim another status. Unrelated traffic must not be able to refute
+/// a claim, or to make it look checked.
+fn about(
+    endpoint: &str,
+    status: Option<u16>,
+    evidence: Vec<Item<HttpExchange>>,
+) -> Result<Vec<Item<HttpExchange>>, CheckError> {
+    let endpoint = Endpoint::parse(endpoint).map_err(|e| CheckError::InvalidClaim(e.into()))?;
+    for item in &evidence {
+        let request = &item.data.request;
+        let got = item.data.response.as_ref().map(|r| r.status);
+        // The query string can hold keys and tokens, so it stays out of the message.
+        let line = request.url.split(['?', '#']).next().unwrap_or_default();
+        let what = if !endpoint.matches(&request.method, &request.url) {
+            format!("`{} {line}`", request.method)
+        } else if status.is_some() && got != status {
+            got.map_or_else(
+                || "a request with no response".into(),
+                |s| format!("a {s} response"),
+            )
+        } else {
+            continue;
+        };
+        return Err(CheckError::NotApplicable(item.id.clone(), what));
+    }
+    Ok(evidence)
 }
 
 /// Saved evidence as stored: its id, its declared kind and its bytes.
@@ -376,15 +436,13 @@ pub fn check_claim(
             run(&MemoryLayoutChecker, id, c, items, limit)
         }
         ClaimKind::RequestSignature(c) => {
-            let items = decode(EvidenceKind::CapturedRequest, json, evidence, |b| {
-                serde_json::from_slice(b).map_err(|e| e.to_string())
-            });
+            let items = decode(EvidenceKind::HttpExchange, json, evidence, http_exchange)
+                .and_then(|items| about(&c.endpoint, None, items));
             run(&SignatureChecker, id, c, items, limit)
         }
         ClaimKind::ResponseSchema(c) => {
-            let items = decode(EvidenceKind::CapturedExchange, json, evidence, |b| {
-                serde_json::from_slice(b).map_err(|e| e.to_string())
-            });
+            let items = decode(EvidenceKind::HttpExchange, json, evidence, http_exchange)
+                .and_then(|items| about(&c.endpoint, Some(c.status), items));
             run(&SchemaChecker, id, c, items, limit)
         }
     }
@@ -393,8 +451,37 @@ pub fn check_claim(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ledger_core::FieldLayout;
-    use std::collections::BTreeMap;
+    use ledger_core::{FieldLayout, Header, HttpRequest, HttpResponse};
+
+    /// A captured exchange: a POST with one header and a text body, answered with JSON.
+    fn exchange(
+        url: &str,
+        header: (&str, &str),
+        body: &str,
+        status: u16,
+        response: &serde_json::Value,
+    ) -> HttpExchange {
+        HttpExchange {
+            request: HttpRequest {
+                method: "POST".into(),
+                url: url.into(),
+                headers: vec![Header {
+                    name: header.0.into(),
+                    value: header.1.into(),
+                }],
+                body: Some(Body::Text(body.into())),
+            },
+            response: Some(HttpResponse {
+                status,
+                headers: vec![],
+                body: Some(Body::Text(response.to_string())),
+            }),
+        }
+    }
+
+    fn stored(exchange: &HttpExchange) -> Result<Vec<u8>, CheckError> {
+        serde_json::to_vec(exchange).map_err(|e| CheckError::InvalidClaim(e.to_string()))
+    }
 
     fn item<E>(name: &[u8], data: E) -> Item<E> {
         Item {
@@ -412,7 +499,7 @@ mod tests {
     #[test]
     fn header_names_ignore_case_and_base64_does_not() -> Result<(), CheckError> {
         let claim = RequestSignature {
-            endpoint: "/purchase".into(),
+            endpoint: "POST /purchase".into(),
             header: "X-Sig".into(),
             algorithm: SigAlgorithm::HmacSha1,
             encoding: SigEncoding::Base64,
@@ -426,9 +513,14 @@ mod tests {
             good.to_lowercase(),
             "the test needs a signature with capitals"
         );
-        let request = |header: &str, value: &str| CapturedRequest {
-            headers: BTreeMap::from([(header.into(), value.into())]),
-            body: "item=1".into(),
+        let request = |header: &str, value: &str| {
+            exchange(
+                "/purchase",
+                (header, value),
+                "item=1",
+                200,
+                &serde_json::json!({}),
+            )
         };
         let held = |request| -> Result<bool, CheckError> {
             let verdict = SignatureChecker.check(&claim, &[item(b"r", request)], soon())?;
@@ -443,9 +535,15 @@ mod tests {
         let key =
             hex::decode(&claim.key_hex).map_err(|e| CheckError::InvalidClaim(e.to_string()))?;
         let mac = sign(claim.algorithm, &key, body.as_bytes()).map_err(CheckError::InvalidClaim)?;
-        let request =
-            serde_json::json!({"headers": {&claim.header: hex::encode(mac)}, "body": body});
-        Ok(request.to_string().into_bytes())
+        let header = (claim.header.as_str(), hex::encode(mac));
+        let url = "https://game.example/score?session=abc";
+        stored(&exchange(
+            url,
+            (header.0, &header.1),
+            body,
+            200,
+            &serde_json::json!({}),
+        ))
     }
 
     /// Runs every claim over the same evidence and returns how many were refuted.
@@ -469,7 +567,7 @@ mod tests {
     #[test]
     fn seeded_wrong_claims_are_refuted() -> Result<(), CheckError> {
         let truth = RequestSignature {
-            endpoint: "/score".into(),
+            endpoint: "POST game.example/score".into(),
             header: "X-Sig".into(),
             algorithm: SigAlgorithm::HmacSha256,
             encoding: SigEncoding::Hex,
@@ -488,7 +586,7 @@ mod tests {
             wrong(|c| c.encoding = SigEncoding::Base64),
             wrong(|c| c.header = "X-Signature".into()),
         ];
-        let kind = EvidenceKind::CapturedRequest;
+        let kind = EvidenceKind::HttpExchange;
         assert_eq!(
             refuted(
                 &[ClaimKind::RequestSignature(truth.clone())],
@@ -499,13 +597,15 @@ mod tests {
         );
         assert_eq!(refuted(&seeded, kind, &requests)?, seeded.len());
 
+        let profile = |json| stored(&exchange("/profile", ("a", "b"), "", 200, &json));
         let responses = [
-            br#"{"response": {"level": 3, "name": "ann"}}"#.to_vec(),
-            br#"{"response": {"level": 70, "name": "bo"}}"#.to_vec(),
+            profile(serde_json::json!({"level": 3, "name": "ann"}))?,
+            profile(serde_json::json!({"level": 70, "name": "bo"}))?,
         ];
         let schema = |schema: serde_json::Value| {
             ClaimKind::ResponseSchema(ResponseSchema {
-                endpoint: "/profile".into(),
+                endpoint: "POST /profile".into(),
+                status: 200,
                 schema,
             })
         };
@@ -519,7 +619,7 @@ mod tests {
                 serde_json::json!({"properties": {"level": true}, "additionalProperties": false}),
             ),
         ];
-        let kind = EvidenceKind::CapturedExchange;
+        let kind = EvidenceKind::HttpExchange;
         assert_eq!(
             refuted(
                 &[level(serde_json::json!({"type": "integer"}))],
@@ -540,6 +640,77 @@ mod tests {
         assert!(field_holds(&FieldKind::Text { min: 1 }, &field).is_err());
         assert!(field_holds(&FieldKind::Text { min: 3 }, b"c1a0\0\xff\xff\xff").is_ok());
         assert!(field_holds(&FieldKind::Text { min: 5 }, b"c1a0\0\xff\xff\xff").is_err());
+    }
+
+    /// Trial 2: a claim filed under a made-up endpoint held, and requests to another
+    /// endpoint refuted a true claim. Captures that are not about the claim are refused.
+    #[test]
+    fn captures_of_another_endpoint_or_status_are_refused() -> Result<(), CheckError> {
+        let id = ClaimId::of(b"c");
+        let limit = Duration::from_secs(5);
+        let raw = |e: &HttpExchange| {
+            Ok::<_, CheckError>((EvidenceId::of(b"e"), EvidenceKind::HttpExchange, stored(e)?))
+        };
+        let about = |claim: &ClaimKind,
+                     e: &HttpExchange|
+         -> Result<Result<Verdict, CheckError>, CheckError> {
+            let (id_e, kind, bytes) = raw(e)?;
+            Ok(check_claim(&id, claim, &[(id_e, kind, &bytes[..])], limit))
+        };
+        let schema = |endpoint: &str| {
+            ClaimKind::ResponseSchema(ResponseSchema {
+                endpoint: endpoint.into(),
+                status: 200,
+                schema: serde_json::json!({"required": ["id"]}),
+            })
+        };
+        let ok = serde_json::json!({"id": 1});
+        let serde = exchange(
+            "https://crates.io/api/v1/crates/serde?include=x",
+            ("a", "b"),
+            "",
+            200,
+            &ok,
+        );
+        let claim = schema("POST crates.io/api/v1/crates/{name}");
+        assert!(matches!(about(&claim, &serde)?, Ok(Verdict::Held { .. })));
+        // Another path, another host, another status: none of them is evidence for this claim.
+        let owners = exchange(
+            "https://crates.io/api/v1/crates/serde/owners",
+            ("a", "b"),
+            "",
+            200,
+            &ok,
+        );
+        let other_host = exchange(
+            "https://docs.rs/api/v1/crates/serde",
+            ("a", "b"),
+            "",
+            200,
+            &ok,
+        );
+        let not_found = exchange(
+            "https://crates.io/api/v1/crates/nope",
+            ("a", "b"),
+            "",
+            404,
+            &serde_json::json!({"errors": []}),
+        );
+        for capture in [&owners, &other_host, &not_found] {
+            assert!(matches!(
+                about(&claim, capture)?,
+                Err(CheckError::NotApplicable(..))
+            ));
+        }
+        assert!(matches!(
+            about(&schema("POST /api/v9/nowhere"), &serde)?,
+            Err(CheckError::NotApplicable(..))
+        ));
+        // The query string, which can hold keys, is not echoed.
+        if let Err(e) = about(&schema("POST /nowhere"), &serde)? {
+            assert!(!e.to_string().contains("include"), "{e}");
+        }
+        Ok(())
     }
 
     /// A made-up save header: magic, version 113, a size, a float time, a map name,
@@ -678,15 +849,12 @@ mod tests {
         assert!(matches!(out_of_time, Verdict::Inconclusive { .. }));
 
         let schema = ClaimKind::ResponseSchema(ResponseSchema {
-            endpoint: "/p".into(),
+            endpoint: "POST /p".into(),
+            status: 200,
             schema: serde_json::json!({}),
         });
         let huge = vec![b' '; MAX_PARSED_EVIDENCE + 1];
-        let oversized = (
-            EvidenceId::of(b"h"),
-            EvidenceKind::CapturedExchange,
-            &huge[..],
-        );
+        let oversized = (EvidenceId::of(b"h"), EvidenceKind::HttpExchange, &huge[..]);
         let limit = Duration::from_secs(5);
         assert!(matches!(
             check_claim(&id, &schema, &[oversized], limit),
@@ -694,7 +862,7 @@ mod tests {
         ));
         let garbage = (
             EvidenceId::of(b"g"),
-            EvidenceKind::CapturedExchange,
+            EvidenceKind::HttpExchange,
             &b"\xff{["[..],
         );
         assert!(matches!(
@@ -734,17 +902,15 @@ mod tests {
     #[test]
     fn signature_replay_holds_for_rfc4231_case_2() -> Result<(), CheckError> {
         let claim = RequestSignature {
-            endpoint: "/x".into(),
+            endpoint: "POST /x".into(),
             header: "X-Sig".into(),
             algorithm: SigAlgorithm::HmacSha256,
             encoding: SigEncoding::Hex,
             key_hex: hex::encode("Jefe"),
         };
         let sig = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
-        let req = CapturedRequest {
-            headers: BTreeMap::from([("X-Sig".into(), sig.into())]),
-            body: "what do ya want for nothing?".into(),
-        };
+        let body = "what do ya want for nothing?";
+        let req = exchange("/x", ("X-Sig", sig), body, 200, &serde_json::json!({}));
         assert_eq!(
             SignatureChecker.check(&claim, &[item(b"r", req)], soon())?,
             Verdict::Held {
@@ -757,15 +923,18 @@ mod tests {
     #[test]
     fn schema_refutes_wrong_type() -> Result<(), CheckError> {
         let claim = ResponseSchema {
-            endpoint: "/p".into(),
+            endpoint: "POST /p".into(),
+            status: 200,
             schema: serde_json::json!({"type": "object", "properties": {"level": {"type": "integer"}}}),
         };
-        let ok = CapturedExchange {
-            response: serde_json::json!({"level": 3}),
-        };
-        let bad = CapturedExchange {
-            response: serde_json::json!({"level": "3"}),
-        };
+        let ok = exchange("/p", ("a", "b"), "", 200, &serde_json::json!({"level": 3}));
+        let bad = exchange(
+            "/p",
+            ("a", "b"),
+            "",
+            200,
+            &serde_json::json!({"level": "3"}),
+        );
         let v = SchemaChecker.check(&claim, &[item(b"ok", ok), item(b"bad", bad)], soon())?;
         assert!(
             matches!(v, Verdict::Refuted { counterexample } if counterexample.detail.contains("/level"))

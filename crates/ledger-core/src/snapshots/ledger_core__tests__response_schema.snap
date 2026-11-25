@@ -2,4 +2,4 @@
 source: crates/ledger-core/src/lib.rs
 expression: schema().sentence()
 ---
-Responses from /api/v2/profile match the recorded JSON Schema.
+200 responses to `GET game.example/api/v2/profile/{id}` match the recorded JSON Schema.

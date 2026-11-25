@@ -107,6 +107,12 @@ impl From<CheckError> for Rejection {
                 "The file is not in the format its kind requires.",
                 next,
             ),
+            CheckError::NotApplicable(id, what) => reject(
+                "evidence_not_applicable",
+                id,
+                format!("It is {what}, which the claim says nothing about."),
+                "The claim is filed but unchecked. Replay only captures of the claim's own endpoint and status.",
+            ),
             CheckError::TooLarge(id, size, max) => reject(
                 "evidence_too_large",
                 id,
@@ -562,19 +568,21 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let store = Store::open(dir.path().join("l.db"))?;
         let request = dir.path().join("request.json");
-        std::fs::write(&request, br#"{"headers": {}, "body": ""}"#)?;
+        let exchange =
+            br#"{"request": {"method": "POST", "url": "https://game.example/score?key=s3cret"}}"#;
+        std::fs::write(&request, exchange)?;
         let garbage = dir.path().join("garbage.json");
         std::fs::write(&garbage, b"not json")?;
         let add = |path: &std::path::Path| -> Result<String, Box<dyn std::error::Error>> {
             let path = path.to_str().ok_or("path")?;
-            let added = add_evidence(&store, EvidenceKind::CapturedRequest, path)
+            let added = add_evidence(&store, EvidenceKind::HttpExchange, path)
                 .map_err(|r| r.to_string())?;
             Ok(added.rsplit(' ').next().unwrap_or_default().to_owned())
         };
         let (request, garbage) = (add(&request)?, add(&garbage)?);
-        let signature = |key: &str| Claim {
+        let signature = |endpoint: &str, key: &str| Claim {
             kind: ClaimKind::RequestSignature(RequestSignature {
-                endpoint: "/score".into(),
+                endpoint: endpoint.into(),
                 header: "X-Sig".into(),
                 algorithm: SigAlgorithm::HmacSha256,
                 encoding: SigEncoding::Hex,
@@ -586,9 +594,27 @@ mod tests {
             rejected(propose(&store, layout("", 0, &[])?, &[])),
             rejected(propose(&store, layout("T", 8, &["0123abcd"])?, &[])),
             rejected(propose(&store, layout("T", 8, &[])?, &["0123abcd".into()])),
-            rejected(propose(&store, layout("T", 8, &[])?, &[request])),
-            rejected(propose(&store, signature("00ff"), &[garbage])),
-            rejected(propose(&store, signature("secret, not hex"), &[])),
+            rejected(propose(
+                &store,
+                layout("T", 8, &[])?,
+                std::slice::from_ref(&request),
+            )),
+            rejected(propose(
+                &store,
+                signature("POST /score", "00ff"),
+                &[garbage],
+            )),
+            rejected(propose(
+                &store,
+                signature("POST /purchase", "00ff"),
+                &[request],
+            )),
+            rejected(propose(
+                &store,
+                signature("POST /score", "secret, not hex"),
+                &[],
+            )),
+            rejected(propose(&store, signature("/score", "00ff"), &[])),
             rejected(ask(&store, About::Claim, None, None, None)),
             rejected(ask(&store, About::Subject, None, None, None)),
             rejected(ask(&store, About::All, None, None, Some("0123abcd"))),

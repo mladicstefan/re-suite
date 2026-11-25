@@ -488,7 +488,6 @@ honestly.
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
 | One flush on the current disk (btrfs on dm-crypt) takes 6.2 ms, so durable `propose` has a 7.2 ms median against the 2 ms budget, and 961 events/s against 1,000. Move the ledger to a filesystem with faster flushes, relax the budget for this machine, or allow `synchronous=NORMAL` for interactive writes? | Before the Phase 1 Store box is ticked |
 | A request-signature claim carries its key (`key_hex`), so the key is in the event log and in the claim's hash, while section 7 says secrets are stored as evidence. Move the key to evidence and have the claim cite it? | Before the trial run |
-| A web capture records headers and a body, not the method, URL or status, so the endpoint a claim names is never checked: in trial 2 a claim under a made-up endpoint held, and requests to another endpoint refuted a true claim for good. Should captures carry the request line, and should evidence for another endpoint be refused? | Phase 2, hardening |
 | A request-signature claim can only say "MAC of the body". Which signed inputs (timestamp, nonce, path, query) should the kind be able to express? | Phase 2, claim kinds |
 | Every response-schema claim has the same sentence. What should it say about the schema so a human can tell two claims apart? | Phase 3, sentences |
 | How far does VerifiedIDA's standard overlap, and should we build on it or interoperate? | Before the open format in Phase 6 |

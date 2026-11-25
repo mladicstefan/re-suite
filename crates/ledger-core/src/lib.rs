@@ -201,6 +201,7 @@ pub enum SigEncoding {
 /// A request header carries a signature over the request body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RequestSignature {
+    /// `METHOD [host]/path`, see [`Endpoint`].
     pub endpoint: String,
     pub header: String,
     pub algorithm: SigAlgorithm,
@@ -208,10 +209,13 @@ pub struct RequestSignature {
     pub key_hex: String,
 }
 
-/// Responses from an endpoint conform to a JSON Schema.
+/// Responses with one status from an endpoint conform to a JSON Schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ResponseSchema {
+    /// `METHOD [host]/path`, see [`Endpoint`].
     pub endpoint: String,
+    /// The response status the schema describes. Other statuses are other claims.
+    pub status: u16,
     pub schema: serde_json::Value,
 }
 
@@ -274,13 +278,13 @@ impl Claim {
                 )
             }
             ClaimKind::RequestSignature(s) => format!(
-                "Requests to {} carry a {:?} signature of the body in header `{}`, {:?} encoded.",
+                "`{}` requests carry a {:?} signature of the body in header `{}`, {:?} encoded.",
                 s.endpoint, s.algorithm, s.header, s.encoding
             ),
             ClaimKind::ResponseSchema(r) => {
                 format!(
-                    "Responses from {} match the recorded JSON Schema.",
-                    r.endpoint
+                    "{} responses to `{}` match the recorded JSON Schema.",
+                    r.status, r.endpoint
                 )
             }
         }
@@ -334,13 +338,21 @@ pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
             }
         }
         ClaimKind::RequestSignature(s) => {
-            if s.endpoint.is_empty() || s.header.is_empty() || hex::decode(&s.key_hex).is_err() {
-                return bad("signature needs endpoint, header and a hex key");
+            if let Err(why) = Endpoint::parse(&s.endpoint) {
+                return bad(why);
+            }
+            if s.header.is_empty() || hex::decode(&s.key_hex).is_err() {
+                return bad("signature needs a header name and a hex key");
             }
         }
         ClaimKind::ResponseSchema(r) => {
-            if r.endpoint.is_empty() || !(r.schema.is_object() || r.schema.is_boolean()) {
-                return bad("response schema needs endpoint and an object or boolean schema");
+            if let Err(why) = Endpoint::parse(&r.endpoint) {
+                return bad(why);
+            }
+            if !(100..600).contains(&r.status) || !(r.schema.is_object() || r.schema.is_boolean()) {
+                return bad(
+                    "response schema needs a status of 100 to 599 and an object or boolean schema",
+                );
             }
         }
     }
@@ -353,22 +365,109 @@ pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceKind {
     MemorySnapshot,
+    /// Retired: headers and a body with no request line. Kept so old events decode.
     CapturedRequest,
+    /// Retired: a response body alone. Kept so old events decode.
     CapturedExchange,
+    /// One request and its response, as [`HttpExchange`].
+    HttpExchange,
 }
 
-/// Evidence format for `EvidenceKind::CapturedRequest`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct CapturedRequest {
-    pub headers: BTreeMap<String, String>,
-    // shortcut: text bodies only, add a base64 variant when binary bodies show up.
-    pub body: String,
+/// One header line. A list of these, not a map: names repeat, and HTTP/2 captures
+/// spell them in lower case and add pseudo-headers such as `:path`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Header {
+    pub name: String,
+    pub value: String,
 }
 
-/// Evidence format for `EvidenceKind::CapturedExchange`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct CapturedExchange {
-    pub response: serde_json::Value,
+/// A captured body: text as it is, anything else as base64.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Body {
+    Text(String),
+    Base64(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HttpRequest {
+    pub method: String,
+    /// Absolute (`https://host/path?query`) or, in a server-side capture, just the path.
+    pub url: String,
+    #[serde(default)]
+    pub headers: Vec<Header>,
+    #[serde(default)]
+    pub body: Option<Body>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HttpResponse {
+    pub status: u16,
+    #[serde(default)]
+    pub headers: Vec<Header>,
+    #[serde(default)]
+    pub body: Option<Body>,
+}
+
+/// Evidence format for `EvidenceKind::HttpExchange`: one request and, if it was
+/// answered, its response. Shaped like a HAR entry; fields a capture tool adds
+/// beyond these are ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HttpExchange {
+    pub request: HttpRequest,
+    #[serde(default)]
+    pub response: Option<HttpResponse>,
+}
+
+/// What a web claim is about: `METHOD [host]/path`, where a path segment written
+/// `{name}` stands for any one segment. `GET crates.io/api/v1/crates/{name}`,
+/// `POST /api/v1/score`. The query string is not part of an endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Endpoint<'a> {
+    method: &'a str,
+    host: Option<&'a str>,
+    path: &'a str,
+}
+
+impl<'a> Endpoint<'a> {
+    /// # Errors
+    /// The text is not a method, a space, and a path with an optional host in front.
+    pub fn parse(text: &'a str) -> Result<Self, &'static str> {
+        let shape =
+            "an endpoint is written `METHOD [host]/path`, like `GET api.example.com/users/{id}`";
+        let (method, rest) = text.split_once(' ').ok_or(shape)?;
+        let slash = rest.find('/').ok_or(shape)?;
+        let (host, path) = rest.split_at(slash);
+        if method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()) {
+            return Err(shape);
+        }
+        if rest.contains([' ', '?', '#']) {
+            return Err("an endpoint has no spaces, query string or fragment");
+        }
+        Ok(Self {
+            method,
+            host: (!host.is_empty()).then_some(host),
+            path,
+        })
+    }
+
+    /// Whether a captured request line belongs to this endpoint.
+    #[must_use]
+    pub fn matches(&self, method: &str, url: &str) -> bool {
+        let (host, path) = match url.split_once("://") {
+            Some((_, rest)) => rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len())),
+            None => ("", url),
+        };
+        let path = path.split(['?', '#']).next().unwrap_or_default();
+        let path = if path.is_empty() { "/" } else { path };
+        let segments = |p: &'a str| p.split('/');
+        method.eq_ignore_ascii_case(self.method)
+            && self.host.is_none_or(|h| h.eq_ignore_ascii_case(host))
+            && path.split('/').count() == segments(self.path).count()
+            && path.split('/').zip(segments(self.path)).all(|(got, want)| {
+                got == want || (want.starts_with('{') && want.ends_with('}') && !got.is_empty())
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -650,7 +749,7 @@ mod tests {
     fn signature() -> Claim {
         Claim {
             kind: ClaimKind::RequestSignature(RequestSignature {
-                endpoint: "/api/v2/score".into(),
+                endpoint: "POST /api/v2/score".into(),
                 header: "X-Sig".into(),
                 algorithm: SigAlgorithm::HmacSha256,
                 encoding: SigEncoding::Hex,
@@ -663,7 +762,8 @@ mod tests {
     fn schema() -> Claim {
         Claim {
             kind: ClaimKind::ResponseSchema(ResponseSchema {
-                endpoint: "/api/v2/profile".into(),
+                endpoint: "GET game.example/api/v2/profile/{id}".into(),
+                status: 200,
                 schema: serde_json::json!({"type": "object"}),
             }),
             premises: BTreeSet::new(),
@@ -707,6 +807,34 @@ mod tests {
             }),
             premises: BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn endpoints_match_request_lines() -> Result<(), &'static str> {
+        let crates = Endpoint::parse("GET crates.io/api/v1/crates/{name}")?;
+        assert!(crates.matches("GET", "https://crates.io/api/v1/crates/serde?include=x"));
+        assert!(crates.matches("get", "https://CRATES.IO/api/v1/crates/tokio#top"));
+        assert!(!crates.matches("POST", "https://crates.io/api/v1/crates/serde"));
+        assert!(!crates.matches("GET", "https://docs.rs/api/v1/crates/serde"));
+        assert!(!crates.matches("GET", "https://crates.io/api/v1/crates/serde/owners"));
+        assert!(!crates.matches("GET", "https://crates.io/api/v1/crates/"));
+        // Without a host the endpoint matches any host, and a server-side capture has only a path.
+        let score = Endpoint::parse("POST /api/v1/score")?;
+        assert!(score.matches("POST", "/api/v1/score"));
+        assert!(score.matches("POST", "http://127.0.0.1:41943/api/v1/score"));
+        assert!(!score.matches("POST", "/api/v1/purchase"));
+        assert!(Endpoint::parse("GET example.com/")?.matches("GET", "https://example.com"));
+        for bad in [
+            "/api/v1/score",
+            "get /x",
+            "GET",
+            "GET /x?y=1",
+            "GET  /x",
+            " /x",
+        ] {
+            assert!(Endpoint::parse(bad).is_err(), "{bad}");
+        }
+        Ok(())
     }
 
     #[test]
