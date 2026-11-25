@@ -489,7 +489,6 @@ honestly.
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
 | One flush on the current disk (btrfs on dm-crypt) takes 6.2 ms, so durable `propose` has a 7.2 ms median against the 2 ms budget, and 961 events/s against 1,000. Move the ledger to a filesystem with faster flushes, relax the budget for this machine, or allow `synchronous=NORMAL` for interactive writes? | Before the Phase 1 Store box is ticked |
 | A request-signature claim carries its key (`key_hex`), so the key is in the event log and in the claim's hash, while section 7 says secrets are stored as evidence. Move the key to evidence and have the claim cite it? | Before the trial run |
-| A response can depend on the query string (a forecast has `current` only when asked for), and an endpoint ignores the query. Should a claim be able to name query parameters it applies to? | Phase 2, claim kinds |
 | A request-signature claim has no status, so a capture of a request the server rejected would refute a true claim. Bind signature claims to accepted requests? | Phase 2, hardening |
 | The agent must know which captures belong to an endpoint, and adds evidence one file per call. Import HAR files, and let `ask` list the evidence about an endpoint? | Phase 2, hardening |
 | A request-signature claim can only say "MAC of the body". Which signed inputs (timestamp, nonce, path, query) should the kind be able to express? | Phase 2, claim kinds |

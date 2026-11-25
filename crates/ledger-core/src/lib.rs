@@ -419,41 +419,89 @@ pub struct HttpExchange {
     pub response: Option<HttpResponse>,
 }
 
-/// What a web claim is about: `METHOD [host]/path`, where a path segment written
-/// `{name}` stands for any one segment. `GET crates.io/api/v1/crates/{name}`,
-/// `POST /api/v1/score`. The query string is not part of an endpoint.
+/// What a web claim is about: `METHOD [host]/path[?conditions]`, where a path
+/// segment written `{name}` stands for any one segment.
+/// `GET crates.io/api/v1/crates/{name}`, `POST /api/v1/score`.
+///
+/// Without conditions the query string is ignored. Conditions, joined by `&`,
+/// narrow the endpoint to requests whose query meets all of them: `name` (the
+/// parameter is present), `name=value` (it has this value) and `!name` (it is
+/// absent). `GET api.example.com/forecast?current&!hourly`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Endpoint<'a> {
     method: &'a str,
     host: Option<&'a str>,
     path: &'a str,
+    conditions: &'a str,
+}
+
+/// Decodes `%XX` escapes; anything else, including a lone `%`, is kept as it is.
+fn percent_decode(text: &str) -> String {
+    let hex = |b: u8| {
+        char::from(b)
+            .to_digit(16)
+            .and_then(|d| u8::try_from(d).ok())
+    };
+    let (bytes, mut out, mut at) = (text.as_bytes(), Vec::with_capacity(text.len()), 0);
+    while at < bytes.len() {
+        let high = bytes.get(at + 1).copied().and_then(hex);
+        let low = bytes.get(at + 2).copied().and_then(hex);
+        match (bytes[at], high, low) {
+            (b'%', Some(high), Some(low)) => {
+                out.push(high << 4 | low);
+                at += 3;
+            }
+            (byte, _, _) => {
+                out.push(byte);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 impl<'a> Endpoint<'a> {
     /// # Errors
-    /// The text is not a method, a space, and a path with an optional host in front.
+    /// The text is not a method, a space, and a path with an optional host in
+    /// front and optional query conditions behind.
     pub fn parse(text: &'a str) -> Result<Self, &'static str> {
         let shape =
             "an endpoint is written `METHOD [host]/path`, like `GET api.example.com/users/{id}`";
         let (method, rest) = text.split_once(' ').ok_or(shape)?;
+        let (rest, conditions) = match rest.split_once('?') {
+            Some((rest, conditions)) => (rest, Some(conditions)),
+            None => (rest, None),
+        };
         let slash = rest.find('/').ok_or(shape)?;
         let (host, path) = rest.split_at(slash);
         if method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()) {
             return Err(shape);
         }
-        if rest.contains([' ', '?', '#']) {
-            return Err("an endpoint has no spaces, query string or fragment");
+        if text.contains('#')
+            || rest.contains(' ')
+            || conditions.is_some_and(|c| c.contains([' ', '?']))
+        {
+            return Err("an endpoint has no spaces and no fragment");
+        }
+        let named = |condition: &str| {
+            let name = condition.trim_start_matches('!').split('=').next();
+            !name.unwrap_or_default().is_empty()
+        };
+        if conditions.is_some_and(|c| !c.split('&').all(named)) {
+            return Err("query conditions are `name`, `name=value` or `!name`, joined by `&`");
         }
         Ok(Self {
             method,
             host: (!host.is_empty()).then_some(host),
             path,
+            conditions: conditions.unwrap_or_default(),
         })
     }
 
-    /// Whether a captured request line belongs to this endpoint.
+    /// Whether a captured request has this endpoint's method, host and path,
+    /// whatever its query string.
     #[must_use]
-    pub fn matches(&self, method: &str, url: &str) -> bool {
+    pub fn matches_path(&self, method: &str, url: &str) -> bool {
         let (host, path) = match url.split_once("://") {
             Some((_, rest)) => rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len())),
             None => ("", url),
@@ -467,6 +515,29 @@ impl<'a> Endpoint<'a> {
             && path.split('/').zip(segments(self.path)).all(|(got, want)| {
                 got == want || (want.starts_with('{') && want.ends_with('}') && !got.is_empty())
             })
+    }
+
+    /// Whether a captured request belongs to this endpoint: [`Endpoint::matches_path`]
+    /// and every query condition.
+    #[must_use]
+    pub fn matches(&self, method: &str, url: &str) -> bool {
+        let query = url.split('#').next().unwrap_or_default();
+        let query = query.split_once('?').map_or("", |(_, q)| q);
+        let pairs: Vec<(String, String)> = (query.split('&').filter(|p| !p.is_empty()))
+            .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
+            .map(|(name, value)| (percent_decode(name), percent_decode(value)))
+            .collect();
+        let has = |name: &str| pairs.iter().any(|(n, _)| *n == percent_decode(name));
+        let met = |condition: &str| match (condition.strip_prefix('!'), condition.split_once('=')) {
+            (Some(name), _) => !has(name),
+            (None, Some((name, value))) => {
+                let (name, value) = (percent_decode(name), percent_decode(value));
+                pairs.iter().any(|(n, v)| *n == name && *v == value)
+            }
+            (None, None) => has(condition),
+        };
+        let conditions = self.conditions.split('&').filter(|c| !c.is_empty());
+        self.matches_path(method, url) && conditions.into_iter().all(met)
     }
 }
 
@@ -824,11 +895,43 @@ mod tests {
         assert!(score.matches("POST", "http://127.0.0.1:41943/api/v1/score"));
         assert!(!score.matches("POST", "/api/v1/purchase"));
         assert!(Endpoint::parse("GET example.com/")?.matches("GET", "https://example.com"));
+        // Query conditions narrow an endpoint; without them the query is ignored.
+        let asked =
+            "https://api.example.com/v1/forecast?latitude=52.52&current=temperature_2m%2Cwind";
+        let plain = "https://api.example.com/v1/forecast?latitude=52.52&hourly=rain";
+        let met =
+            |endpoint: &'static str, url| Endpoint::parse(endpoint).map(|e| e.matches("GET", url));
+        assert_eq!(met("GET /v1/forecast", asked), Ok(true));
+        assert_eq!(met("GET /v1/forecast?current", asked), Ok(true));
+        assert_eq!(met("GET /v1/forecast?current", plain), Ok(false));
+        assert_eq!(
+            met("GET /v1/forecast?!current&hourly=rain", plain),
+            Ok(true)
+        );
+        assert_eq!(met("GET /v1/forecast?!current", asked), Ok(false));
+        assert_eq!(
+            met("GET /v1/forecast?current=temperature_2m,wind", asked),
+            Ok(true)
+        );
+        assert_eq!(
+            met(
+                "GET /v1/forecast?current=temperature_2m%2Cwind&latitude=52.52",
+                asked
+            ),
+            Ok(true)
+        );
+        assert_eq!(met("GET /v1/forecast?current=wind", asked), Ok(false));
+        assert_eq!(met("GET /v1/other?current", asked), Ok(false));
+        assert!(Endpoint::parse("GET /v1/forecast?current")?.matches_path("GET", plain));
         for bad in [
             "/api/v1/score",
             "get /x",
             "GET",
-            "GET /x?y=1",
+            "GET /x?",
+            "GET /x?a&&b",
+            "GET /x?=1",
+            "GET /x?!",
+            "GET /x#f",
             "GET  /x",
             " /x",
         ] {

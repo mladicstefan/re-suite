@@ -72,10 +72,16 @@ another status, another host, page-load noise, another method.
 
 - **Fixed: a counterexample could be 3,000 characters long.** The schema
   validator quotes the failing value. Details are cut at 300 characters.
-- **Open: the response depends on the query string, and an endpoint
-  ignores it.** The forecast has `current` only when asked for; a crate
-  record has one version or all of them. A claim cannot say "when the
-  query has `current=`".
+- **Fixed afterwards: the response depends on the query string, and an
+  endpoint ignored it.** The forecast has `current` only when asked for;
+  a crate record has one version or all of them. An endpoint can now
+  name query conditions: `?name`, `?name=value`, `?!name`. Re-run on
+  these captures plus two crate records fetched without `include`: the
+  unscoped "one version" claim is refuted, the same claim scoped to
+  `?include=keywords,categories,downloads,default_version` holds on the
+  six page-load captures, and a forecast claim scoped to `?current` can
+  require `current` again and holds on the three captures that asked
+  for it. Captures that do not meet the conditions are refused.
 - **Open: a signature claim has no status.** A capture of a request the
   server rejected would refute a true claim about accepted requests.
 - **Open: the agent has to know which captures belong to an endpoint.**

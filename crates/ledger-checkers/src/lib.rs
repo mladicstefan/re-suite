@@ -368,8 +368,10 @@ fn about(
         let got = item.data.response.as_ref().map(|r| r.status);
         // The query string can hold keys and tokens, so it stays out of the message.
         let line = request.url.split(['?', '#']).next().unwrap_or_default();
-        let what = if !endpoint.matches(&request.method, &request.url) {
+        let what = if !endpoint.matches_path(&request.method, &request.url) {
             format!("`{} {line}`", request.method)
+        } else if !endpoint.matches(&request.method, &request.url) {
+            "a request whose query string does not meet the endpoint's conditions".into()
         } else if status.is_some() && got != status {
             got.map_or_else(
                 || "a request with no response".into(),
@@ -715,6 +717,17 @@ mod tests {
         }
         assert!(matches!(
             about(&schema("POST /api/v9/nowhere"), &serde)?,
+            Err(CheckError::NotApplicable(..))
+        ));
+        // An endpoint with query conditions takes only the requests that meet them.
+        let narrowed = schema("POST crates.io/api/v1/crates/{name}?include=x");
+        assert!(matches!(
+            about(&narrowed, &serde)?,
+            Ok(Verdict::Held { .. })
+        ));
+        let other = schema("POST crates.io/api/v1/crates/{name}?!include");
+        assert!(matches!(
+            about(&other, &serde)?,
             Err(CheckError::NotApplicable(..))
         ));
         // The query string, which can hold keys, is not echoed.
