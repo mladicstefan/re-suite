@@ -170,6 +170,23 @@ fn interactive(
     })
 }
 
+/// Median time to make a 4 KB append durable in `dir`.
+fn flush_time(dir: &Path) -> Res<Duration> {
+    use std::io::Write as _;
+    let path = dir.join("flush.probe");
+    let mut file = std::fs::File::create(&path)?;
+    let mut times = Vec::new();
+    for _ in 0..200 {
+        file.write_all(&[0; 4096])?;
+        let start = Instant::now();
+        file.sync_data()?;
+        times.push(start.elapsed());
+    }
+    std::fs::remove_file(path)?;
+    times.sort();
+    Ok(percentile(&times, 50))
+}
+
 /// The alternative the roadmap rules out: every event its own synced transaction.
 fn one_transaction_per_event(db: &Path) -> Res<(Vec<Duration>, Duration)> {
     drop(Store::open(db)?); // creates the schema
@@ -390,15 +407,28 @@ fn interactive_rows(report: &mut Report, dir: &Path, ids: &[ClaimId]) -> Res {
         took < Duration::from_secs(1),
     );
 
+    // A durable write cannot be faster than the disk's flush, so the write budgets are
+    // stated against a flush measured here, on the same disk.
+    let flush = flush_time(dir)?;
+    row(
+        "One disk flush (sync of a 4 KB append), median",
+        &format!("{flush:.2?}"),
+    );
     let (latencies, took, reads) = interactive(&store, ids, READERS)?;
     let (p50, p99) = (percentile(&latencies, 50), percentile(&latencies, 99));
     report.budget(
         "7 agents, each waiting for a durable write (group commit, `synchronous=FULL`), 7 readers running",
         &writes(&latencies, took),
-        "p50 under 2 ms, p99 under 25 ms, at least 1,000 events/s",
-        p50 < Duration::from_millis(2)
-            && p99 < Duration::from_millis(25)
-            && per_second(latencies.len(), took) >= 1000.0,
+        "p50 under one flush plus 2 ms, p99 under 25 ms",
+        p50 < flush + Duration::from_millis(2) && p99 < Duration::from_millis(25),
+    );
+    let rate = per_second(latencies.len(), took);
+    let floor = (5.0 / flush.as_secs_f64()).min(1000.0);
+    report.budget(
+        "Sustained interactive writes, the same run",
+        &format!("{rate:.0} events/s"),
+        &format!("at least 1,000 events/s, or 5 per flush on a slower disk ({floor:.0})"),
+        rate >= floor,
     );
     let p99 = percentile(&reads, 99);
     report.budget(

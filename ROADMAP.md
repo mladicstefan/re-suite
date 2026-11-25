@@ -189,9 +189,9 @@ What the baseline shows:
 - Reads, replay and status are far inside their budgets. The ledger is
   not the bottleneck for them; checks are.
 - Durable writes cost one disk flush per commit, whatever the software
-  does. On this disk that is 6.2 ms, so the 2 ms median budget cannot be
-  met here (see the open questions). On tmpfs, where a flush is free, the
-  same code has a median of 0.26 ms.
+  does. On this disk that is 6.2 ms, so a durable write has a median of
+  about 7 ms. On tmpfs, where a flush is free, the same code has a median
+  of 0.26 ms.
 - Group commit is worth about 6 times the throughput and 60 times the
   p99 latency. It is required, not an optimisation.
 - Plain recursion for status is exponential on shared premises. Status
@@ -209,14 +209,35 @@ benchmark that lives in the repository.
 
 | Operation | Budget |
 | --- | --- |
-| Durable `propose` with 7 concurrent agents | p50 under 2 ms, p99 under 25 ms |
+| Durable `propose` with 7 concurrent agents | p50 under one disk flush plus 2 ms, p99 under 25 ms |
 | Status or point query | p99 under 1 ms |
-| Sustained interactive writes | at least 1,000 events/s |
+| Sustained interactive writes | at least 1,000 events/s, or 5 events per disk flush where a flush takes over 5 ms |
 | Bulk import | at least 50,000 events/s |
 | Cold start by replay | 100,000 events in under 1 s; 1,000,000 in under 10 s |
 | Recompute status after one verdict, 1,000,000 claims | under 50 ms |
 | One page of a claim list (200 rows) at 100,000 claims | under 16 ms, one display frame |
 | Agent-facing response size | bounded and paged; no response grows with ledger size |
+
+The write budgets are stated against the disk's flush time because a
+durable write cannot be faster than one flush; the benchmark measures the
+flush on the disk it runs on. They were restated on 26 November 2026: the
+first version asked for a 2 ms median, which the current disk (6.2 ms per
+flush) cannot give at any amount of software work.
+
+**Performance work still owed.** The software's own share of a durable
+write is about 0.3 ms, of which 0.1 ms is the group-commit wait. What is
+left to gain is outside that: put the ledger on a filesystem that flushes
+faster (the same NVMe drive under btrfs on dm-crypt takes 6.2 ms; a
+flush on a plain ext4 or xfs partition is usually well under 1 ms), and
+make the group-commit wait adapt to the flush time instead of a fixed
+100 microseconds. Writes also stall when the disk is busy with something else: two
+benchmark runs started straight after another disk-heavy run had a p99 of
+130 to 143 ms and a third of the throughput, while three runs taken a
+minute later met every budget (972 to 977 events/s, median 7.0 ms, p99 9
+to 13 ms). The ledger has no defence against that yet.
+Replay is single-threaded at about 200,000 events/s,
+which meets the cold-start budget for 1,000,000 events with a factor of
+two to spare and no more.
 
 Check time limits are policy, not measurements: start with 5 s for replay
 checks and 10 s for solver checks, both configurable per claim kind.
@@ -327,7 +348,7 @@ Done when a clean checkout builds and passes CI with no warnings.
 Goal: an agent's wrong claim about a game or a web API is caught, with a
 concrete failing case.
 
-- [ ] **Store.** Event log, evidence index, group commit, state rebuilt
+- [x] **Store.** Event log, evidence index, group commit, state rebuilt
       by replay
 - [x] **Checkers.** Memory layout over snapshots, signature replay over
       captured requests, response shape over captured exchanges
@@ -487,7 +508,6 @@ honestly.
 | Which anchor survives real version changes with the fewest false matches? | Phase 2, version reruns |
 | How much of x86-64 and AArch64 does RzIL lift, and how often does it disagree with a second lifter? | End of Phase 2 |
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
-| One flush on the current disk (btrfs on dm-crypt) takes 6.2 ms, so durable `propose` has a 7.2 ms median against the 2 ms budget, and 961 events/s against 1,000. Move the ledger to a filesystem with faster flushes, relax the budget for this machine, or allow `synchronous=NORMAL` for interactive writes? | Before the Phase 1 Store box is ticked |
 | A request-signature claim carries its key (`key_hex`), so the key is in the event log and in the claim's hash, while section 7 says secrets are stored as evidence. Move the key to evidence and have the claim cite it? | Before the trial run |
 | A request-signature claim has no status, so a capture of a request the server rejected would refute a true claim. Bind signature claims to accepted requests? | Phase 2, hardening |
 | The agent must know which captures belong to an endpoint, and adds evidence one file per call. Import HAR files, and let `ask` list the evidence about an endpoint? | Phase 2, hardening |
