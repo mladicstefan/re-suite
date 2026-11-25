@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "relation(Relation::BytesAfter { from: 264 }).sentence()"
+---
+In `SaveDirEntry`, the 4-byte value at +0x104 equals the number of bytes after +0x108.

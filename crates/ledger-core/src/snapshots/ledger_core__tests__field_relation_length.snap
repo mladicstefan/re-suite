@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "relation(Relation::SnapshotLength).sentence()"
+---
+In `SaveDirEntry`, the 4-byte value at +0x104 equals the length of the whole snapshot.

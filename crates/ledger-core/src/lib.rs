@@ -308,9 +308,42 @@ pub struct RecordArray {
     pub exact: bool,
 }
 
+/// A little-endian unsigned integer somewhere in a snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntField {
+    pub offset: u64,
+    /// Bytes in the integer: 1, 2, 4 or 8.
+    pub len: u64,
+}
+
+/// What a field's value is determined by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Relation {
+    /// The number of bytes from `from` to the end of the snapshot.
+    BytesAfter { from: u64 },
+    /// The length of the whole snapshot.
+    SnapshotLength,
+    /// The sum of other integer fields, plus a constant.
+    Sum {
+        fields: Vec<IntField>,
+        #[serde(default)]
+        plus: i64,
+    },
+}
+
+/// One integer field equals a length or a sum taken from the rest of the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FieldRelation {
+    pub type_name: String,
+    pub field: IntField,
+    pub equals: Relation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimKind {
+    FieldRelation(FieldRelation),
     RecordArray(RecordArray),
     StatusSet(StatusSet),
     RequestBodySchema(RequestBodySchema),
@@ -342,6 +375,7 @@ impl Claim {
     #[must_use]
     pub const fn subject(&self) -> &str {
         match &self.kind {
+            ClaimKind::FieldRelation(r) => r.type_name.as_str(),
             ClaimKind::RecordArray(r) => r.type_name.as_str(),
             ClaimKind::StatusSet(s) => s.endpoint.as_str(),
             ClaimKind::RequestBodySchema(b) => b.endpoint.as_str(),
@@ -356,6 +390,28 @@ impl Claim {
     #[must_use]
     pub fn sentence(&self) -> String {
         match &self.kind {
+            ClaimKind::FieldRelation(r) => {
+                let equals = match &r.equals {
+                    Relation::BytesAfter { from } => {
+                        format!("the number of bytes after +{from:#x}")
+                    }
+                    Relation::SnapshotLength => "the length of the whole snapshot".to_owned(),
+                    Relation::Sum { fields, plus } => {
+                        let at: Vec<String> =
+                            fields.iter().map(|f| format!("+{:#x}", f.offset)).collect();
+                        let constant = match plus {
+                            0 => String::new(),
+                            n if *n > 0 => format!(" plus {n}"),
+                            n => format!(" minus {}", n.unsigned_abs()),
+                        };
+                        format!("the sum of the values at {}{constant}", at.join(", "))
+                    }
+                };
+                format!(
+                    "In `{}`, the {}-byte value at +{:#x} equals {equals}.",
+                    r.type_name, r.field.len, r.field.offset
+                )
+            }
             ClaimKind::RecordArray(r) => {
                 let end = if r.exact {
                     ", and nothing after them"
@@ -527,6 +583,18 @@ fn fields_fit(fields: &[FieldLayout], size: u64) -> Result<(), String> {
 pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
     let bad = |m: &str| Err(CoreError::Inadmissible(m.to_owned()));
     match &claim.kind {
+        ClaimKind::FieldRelation(r) => {
+            let integer = |f: &IntField| matches!(f.len, 1 | 2 | 4 | 8);
+            let summed = match &r.equals {
+                Relation::Sum { fields, .. } => !fields.is_empty() && fields.iter().all(integer),
+                Relation::BytesAfter { .. } | Relation::SnapshotLength => true,
+            };
+            if r.type_name.is_empty() || !integer(&r.field) || !summed {
+                return bad(
+                    "a field relation needs a type name, integers of 1, 2, 4 or 8 bytes, and at least one field to sum",
+                );
+            }
+        }
         ClaimKind::RecordArray(r) => {
             if r.type_name.is_empty() || r.stride == 0 || !matches!(r.count_len, 1 | 2 | 4 | 8) {
                 return bad(
@@ -1458,6 +1526,52 @@ mod tests {
 
     #[test]
     fn sentences_of_newer_kinds() {
+        let relation = |equals| Claim {
+            kind: ClaimKind::FieldRelation(FieldRelation {
+                type_name: "SaveDirEntry".into(),
+                field: IntField {
+                    offset: 260,
+                    len: 4,
+                },
+                equals,
+            }),
+            premises: BTreeSet::new(),
+        };
+        let parts = vec![
+            IntField { offset: 8, len: 4 },
+            IntField { offset: 16, len: 4 },
+        ];
+        insta::assert_snapshot!(
+            "field_relation_bytes_after",
+            relation(Relation::BytesAfter { from: 264 }).sentence()
+        );
+        insta::assert_snapshot!(
+            "field_relation_length",
+            relation(Relation::SnapshotLength).sentence()
+        );
+        insta::assert_snapshot!(
+            "field_relation_sum",
+            relation(Relation::Sum {
+                fields: parts,
+                plus: -20
+            })
+            .sentence()
+        );
+        assert!(admit(relation(Relation::SnapshotLength)).is_ok());
+        assert!(
+            admit(relation(Relation::Sum {
+                fields: vec![],
+                plus: 4
+            }))
+            .is_err()
+        );
+        assert!(
+            admit(relation(Relation::Sum {
+                fields: vec![IntField { offset: 0, len: 3 }],
+                plus: 0
+            }))
+            .is_err()
+        );
         let array = |stride, fields: Vec<FieldLayout>, exact| Claim {
             kind: ClaimKind::RecordArray(RecordArray {
                 type_name: "EntityList".into(),
@@ -1487,6 +1601,10 @@ mod tests {
             "a field longer than the record"
         );
         assert!(admit(array(0, vec![], true)).is_err());
+    }
+
+    #[test]
+    fn sentences_of_web_kinds() {
         let statuses = |statuses: &[u16]| Claim {
             kind: ClaimKind::StatusSet(StatusSet {
                 endpoint: "GET crates.io/api/v1/crates/{name}".into(),

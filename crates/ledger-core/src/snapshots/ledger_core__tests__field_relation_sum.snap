@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "relation(Relation::Sum { fields: parts, plus: -20 }).sentence()"
+---
+In `SaveDirEntry`, the 4-byte value at +0x104 equals the sum of the values at +0x8, +0x10 minus 20.

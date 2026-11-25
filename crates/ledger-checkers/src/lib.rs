@@ -576,11 +576,67 @@ impl Checker<'_> for StatusChecker {
     }
 }
 
+pub struct RelationChecker;
+
+impl<'e> Checker<'e> for RelationChecker {
+    const ID: &'static str = "field_relation";
+    const VERSION: u32 = 1;
+    type Claim = ledger_core::FieldRelation;
+    type Evidence = &'e [u8];
+
+    fn check(
+        &self,
+        claim: &Self::Claim,
+        evidence: &[Item<&'e [u8]>],
+        deadline: Instant,
+    ) -> Result<Verdict, CheckError> {
+        use ledger_core::Relation;
+        Ok(replay(evidence, deadline, |bytes| {
+            let read = |f: &ledger_core::IntField| {
+                let found = slice(bytes, f.offset, f.len).map(uint).map(i128::from);
+                found.ok_or_else(|| {
+                    format!("the value at +{:#x} lies outside the snapshot", f.offset)
+                })
+            };
+            let len = bytes.len() as u64;
+            let value = read(&claim.field)?;
+            let (expected, what) = match &claim.equals {
+                Relation::SnapshotLength => (i128::from(len), "the snapshot's length".to_owned()),
+                Relation::BytesAfter { from } => {
+                    let rest = len.checked_sub(*from);
+                    let rest =
+                        rest.ok_or_else(|| format!("+{from:#x} lies outside the snapshot"))?;
+                    (
+                        i128::from(rest),
+                        format!("the number of bytes after +{from:#x}"),
+                    )
+                }
+                Relation::Sum { fields, plus } => {
+                    let mut sum = i128::from(*plus);
+                    for field in fields {
+                        sum += read(field)?;
+                    }
+                    (sum, "the sum".to_owned())
+                }
+            };
+            if value == expected {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the value at +{:#x} is {value}, but {what} is {expected}",
+                    claim.field.offset
+                ))
+            }
+        }))
+    }
+}
+
 /// The checker that `check_claim` runs for a claim, by id and version. With the
 /// claim and the evidence, this is what a recorded verdict is cached on.
 #[must_use]
 pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
     let (id, version) = match claim {
+        ClaimKind::FieldRelation(_) => (RelationChecker::ID, RelationChecker::VERSION),
         ClaimKind::RecordArray(_) => (RecordArrayChecker::ID, RecordArrayChecker::VERSION),
         ClaimKind::StatusSet(_) => (StatusChecker::ID, StatusChecker::VERSION),
         ClaimKind::RequestBodySchema(_) => (BodySchemaChecker::ID, BodySchemaChecker::VERSION),
@@ -680,6 +736,7 @@ pub fn check_claim(
 ) -> Result<Verdict, CheckError> {
     let any_status = |_: Option<u16>| None;
     match claim {
+        ClaimKind::FieldRelation(c) => run(&RelationChecker, id, c, snapshots(evidence), limit),
         ClaimKind::RecordArray(c) => run(&RecordArrayChecker, id, c, snapshots(evidence), limit),
         ClaimKind::StatusSet(c) => {
             // A request that was never answered says nothing about which statuses come back.
@@ -1323,6 +1380,64 @@ mod tests {
         assert!(detail(file(3, &[1, 183, 9000])).starts_with("record 2: field `index`"));
         assert!(detail(file(u32::MAX, &[1])).starts_with("the count is 4294967295"));
         Ok(())
+    }
+
+    /// Trial 1's directory entries: a name, a size, then exactly that many bytes of data.
+    #[test]
+    fn field_relations_hold_and_refute() {
+        use ledger_core::{FieldRelation, IntField, Relation};
+        // 8 bytes of name, a 4-byte size, a 4-byte header length, then the data.
+        let entry = |size: u32, data: usize| {
+            let mut bytes = b"c1a0.HL1".to_vec();
+            bytes.extend(size.to_le_bytes());
+            bytes.extend(16u32.to_le_bytes());
+            bytes.extend(vec![0xAB; data]);
+            bytes
+        };
+        let claim = |offset, equals| FieldRelation {
+            type_name: "Entry".into(),
+            field: IntField { offset, len: 4 },
+            equals,
+        };
+        let detail = |claim: &FieldRelation, bytes: &[u8]| match RelationChecker.check(
+            claim,
+            &[item(b"e", bytes)],
+            soon(),
+        ) {
+            Ok(Verdict::Refuted { counterexample }) => counterexample.detail,
+            Ok(Verdict::Held { .. }) => "held".to_owned(),
+            other => format!("{other:?}"),
+        };
+        let size_is_rest = claim(8, Relation::BytesAfter { from: 16 });
+        assert_eq!(detail(&size_is_rest, &entry(40, 40)), "held");
+        assert_eq!(
+            detail(&size_is_rest, &entry(40, 39)),
+            "the value at +0x8 is 40, but the number of bytes after +0x10 is 39"
+        );
+        assert_eq!(
+            detail(&claim(8, Relation::BytesAfter { from: 99 }), &entry(40, 40)),
+            "+0x63 lies outside the snapshot"
+        );
+        // size + header length = the whole entry
+        let whole = Relation::Sum {
+            fields: vec![IntField { offset: 8, len: 4 }],
+            plus: 0,
+        };
+        assert_eq!(detail(&claim(12, whole), &entry(16, 5)), "held");
+        let sum = Relation::Sum {
+            fields: vec![
+                IntField { offset: 8, len: 4 },
+                IntField { offset: 12, len: 4 },
+            ],
+            plus: 0,
+        };
+        let mut total = entry(40, 40);
+        total.extend(56u32.to_le_bytes());
+        assert_eq!(detail(&claim(56, sum), &total), "held");
+        assert_eq!(
+            detail(&claim(56, Relation::SnapshotLength), &total),
+            "the value at +0x38 is 56, but the snapshot's length is 60"
+        );
     }
 
     /// A made-up save header: magic, version 113, a size, a float time, a map name,
