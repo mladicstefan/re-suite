@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 450" role="img" aria-labelledby="hiw-title hiw-desc">
+  <title id="hiw-title">How the ledger works</title>
+  <desc id="hiw-desc">The target is recorded once into capture files. The agent reads the captures and writes a claim. The ledger tests the claim against the captures and returns a verdict, keeps it in a log, and shows the human a sentence, a status and the capture that disagrees.</desc>
+  <style>
+    .bg { fill: #f5f6fb; }
+    .box { fill: #ffffff; stroke: #1b2440; stroke-width: 1.6; }
+    .agent { stroke: #2747d6; stroke-width: 2; }
+    .ledger { fill: #e9edff; stroke: #2747d6; stroke-width: 2.4; }
+    text { font-family: ui-sans-serif, system-ui, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1b2440; }
+    .t { font-size: 17px; font-weight: 700; }
+    .s { font-size: 12.5px; fill: #4a5578; }
+    .l { font-size: 12.5px; font-weight: 600; }
+    .h { font-size: 12.5px; font-weight: 700; fill: #4a5578; letter-spacing: 0.06em; }
+    .a { fill: none; stroke: #1b2440; stroke-width: 1.6; stroke-linecap: round; }
+    .dash { stroke: #4a5578; stroke-dasharray: 5 5; }
+    .head { fill: #1b2440; }
+    .ok { fill: #17794a; font-weight: 700; }
+    .bad { fill: #b3261e; font-weight: 700; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #11141d; }
+      .box { fill: #1a1f2e; stroke: #c9d1ee; }
+      .agent { stroke: #8fa2ff; }
+      .ledger { fill: #20284a; stroke: #8fa2ff; }
+      text { fill: #e6e9f5; }
+      .s, .h { fill: #a3acc9; }
+      .a { stroke: #c9d1ee; }
+      .dash { stroke: #a3acc9; }
+      .head { fill: #c9d1ee; }
+      .ok { fill: #5fd39a; }
+      .bad { fill: #ff8a80; }
+    }
+  </style>
+  <defs>
+    <marker id="hiw-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="head" d="M0 0 L10 5 L0 10 z"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="980" height="450" rx="10"/>
+
+  <!-- replay: captures feed every check -->
+  <path class="a dash" d="M350 118 C350 44 860 44 860 112" marker-end="url(#hiw-head)"/>
+  <text class="s" x="605" y="40" text-anchor="middle">replayed on every check; the target is never contacted again</text>
+
+  <!-- the loop -->
+  <rect class="box" x="20" y="120" width="170" height="110" rx="8"/>
+  <text class="t" x="105" y="156" text-anchor="middle">Target</text>
+  <text class="s" x="105" y="182" text-anchor="middle">a website, a game,</text>
+  <text class="s" x="105" y="200" text-anchor="middle">a binary</text>
+
+  <rect class="box" x="260" y="120" width="180" height="110" rx="8"/>
+  <text class="t" x="350" y="156" text-anchor="middle">Captures</text>
+  <text class="s" x="350" y="182" text-anchor="middle">saved files: a request and</text>
+  <text class="s" x="350" y="200" text-anchor="middle">its response, a snapshot</text>
+
+  <rect class="box agent" x="510" y="120" width="180" height="110" rx="8"/>
+  <text class="t" x="600" y="156" text-anchor="middle">Agent</text>
+  <text class="s" x="600" y="182" text-anchor="middle">reads captures, guesses,</text>
+  <text class="s" x="600" y="200" text-anchor="middle">writes a precise claim</text>
+
+  <rect class="box ledger" x="760" y="120" width="200" height="110" rx="8"/>
+  <text class="t" x="860" y="156" text-anchor="middle">Ledger</text>
+  <text class="s" x="860" y="182" text-anchor="middle">tests the claim against</text>
+  <text class="s" x="860" y="200" text-anchor="middle">every capture it cites</text>
+
+  <path class="a" d="M190 175 H254" marker-end="url(#hiw-head)"/>
+  <text class="l" x="222" y="164" text-anchor="middle">1 record</text>
+  <path class="a" d="M440 175 H504" marker-end="url(#hiw-head)"/>
+  <text class="l" x="472" y="164" text-anchor="middle">2 read</text>
+  <path class="a" d="M690 158 H754" marker-end="url(#hiw-head)"/>
+  <text class="l" x="722" y="147" text-anchor="middle">3 claim</text>
+  <path class="a" d="M760 196 H696" marker-end="url(#hiw-head)"/>
+  <text class="l" x="725" y="218" text-anchor="middle">4 verdict</text>
+
+  <!-- what happens to a verdict -->
+  <rect class="box" x="760" y="312" width="200" height="100" rx="8"/>
+  <text class="t" x="860" y="346" text-anchor="middle">Log</text>
+  <text class="s" x="860" y="372" text-anchor="middle">every claim and verdict,</text>
+  <text class="s" x="860" y="390" text-anchor="middle">kept, never edited</text>
+  <path class="a" d="M860 230 V306" marker-end="url(#hiw-head)"/>
+  <text class="l" x="872" y="273">5 remember</text>
+
+  <rect class="box" x="510" y="312" width="180" height="100" rx="8"/>
+  <text class="t" x="600" y="346" text-anchor="middle">You</text>
+  <text class="s" x="600" y="372" text-anchor="middle">a sentence, a status,</text>
+  <text class="s" x="600" y="390" text-anchor="middle">the capture that disagrees</text>
+  <path class="a" d="M760 362 H696" marker-end="url(#hiw-head)"/>
+  <text class="l" x="727" y="351" text-anchor="middle">6 show</text>
+
+  <!-- what a verdict says -->
+  <text class="h" x="20" y="328">WHAT A VERDICT SAYS</text>
+  <text class="l" x="20" y="358"><tspan class="ok">held on 6</tspan>  six captures agree; that is not proof</text>
+  <text class="l" x="20" y="384"><tspan class="bad">refuted</tspan>  one capture disagrees, and it is named</text>
+  <text class="s" x="20" y="410">A claim resting on a refuted one goes on hold.</text>
+</svg>

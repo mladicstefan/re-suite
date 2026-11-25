@@ -6,6 +6,39 @@ evidence (memory snapshots, captured requests and exchanges) and shown to a huma
 as a plain sentence with a status, plus a counterexample when it fails. Nothing is
 ever sent to a live target.
 
+## How it works
+
+The agent finds things. The ledger checks them against saved recordings of the
+target and remembers the answer.
+
+<img src="docs/how-it-works.svg" alt="The target is recorded once into capture files. The agent reads them and writes a claim. The ledger tests the claim against the captures, returns a verdict, logs it, and shows the human a sentence, a status and the capture that disagrees." width="900">
+
+1. **Record.** The target is recorded once into capture files: a web request with
+   its response, or a snapshot of memory.
+2. **Read.** The agent reads the captures and forms a guess about how the target works.
+3. **Claim.** The agent writes the guess as a precise statement and names the
+   captures to test it on.
+4. **Verdict.** The ledger replays the statement on each capture. It answers
+   `held on N`, or `refuted` with the capture and field that disagree.
+5. **Remember.** The claim and its verdict go into a log that is never edited.
+6. **Show.** The human gets one sentence per finding, its status, and the failing
+   case if there is one.
+
+The ledger knows nothing about the target and cannot come up with a claim. The
+agent can, but is often wrong without noticing. A real run on six captures of
+crates.io:
+
+```
+claim    200 responses to `GET crates.io/api/v1/crates/{name}` have documentation: null
+verdict  refuted by capture 70f35bf33291
+         "https://docs.rs/regex" is not of type "null" at /crate/documentation
+
+claim    the same, with documentation and homepage allowed to be a string or null
+verdict  held on 6 captures
+```
+
+"Held on 6" means six captures did not contradict the claim. It is not proof.
+
 Toolchain: Rust 1.100.0 (pinned in `rust-toolchain.toml`), edition 2024, resolver 3.
 
 ## Crates
