@@ -94,5 +94,8 @@ Four results were wrong, two in each direction.
   one round trip per mistake.
 - **A root-level failure reads "... is a required property at"** with
   nothing after "at".
-- **The signing key is in the claim**, so it is in the event log and in
-  this session record. Already an open question in the roadmap.
+- **Fixed afterwards: the signing key was in the claim**, so it was in
+  the event log and is in this session record. A claim now cites its key
+  as evidence of kind `secret`; the key's bytes are in neither the claim,
+  the log nor any response. The session record shows the old form,
+  `key_hex`, which no longer parses.

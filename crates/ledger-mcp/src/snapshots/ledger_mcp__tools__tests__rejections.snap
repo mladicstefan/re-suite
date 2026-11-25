@@ -8,7 +8,8 @@ evidence_unknown [0123abcd]: No evidence has this id. Next: Call add_evidence wi
 evidence_wrong_kind [HttpExchange]: This kind of evidence cannot check this kind of claim. Next: The claim is filed but unchecked. Propose it again with evidence of the right kind and format.
 evidence_malformed [f9060556d6f5]: The file is not in the format its kind requires. Next: The claim is filed but unchecked. Propose it again with evidence of the right kind and format.
 evidence_not_applicable [6cfbecad6ee9]: It is `POST https://game.example/score`, which the claim says nothing about. Next: The claim is filed but unchecked. Replay only captures of the claim's own endpoint and status.
-claim_inadmissible [claim]: signature needs a header name and a hex key. Next: Fix the claim and propose it again.
+key_unknown [0123abcd]: No evidence has this id. Next: Add the key file with add_evidence kind=secret and cite its id as `key`.
+key_not_secret [6cfbecad6ee9]: This evidence is not of kind secret. Next: Add the key file with add_evidence kind=secret and cite its id as `key`.
 claim_inadmissible [claim]: an endpoint is written `METHOD [host]/path`, like `GET api.example.com/users/{id}`. Next: Fix the claim and propose it again.
 argument_missing [claim]: about=claim needs `claim`. Next: Call ask again with that argument.
 argument_missing [subject]: about=subject needs `subject`. Next: Call ask again with that argument.

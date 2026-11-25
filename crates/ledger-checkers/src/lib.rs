@@ -20,6 +20,8 @@ pub enum CheckError {
     WrongEvidence(EvidenceKind),
     #[error("malformed evidence {0}: {1}")]
     Malformed(EvidenceId, String),
+    #[error("the claim's key {0} was not given as secret evidence")]
+    MissingKey(EvidenceId),
     #[error("evidence {0} is {1}, which the claim says nothing about")]
     NotApplicable(EvidenceId, String),
     #[error("evidence {0} is {1} bytes, over the {2} byte limit for its format")]
@@ -238,11 +240,14 @@ fn field_holds(kind: &FieldKind, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
-pub struct SignatureChecker;
+/// Replays a signature claim with the key its `key` evidence holds.
+pub struct SignatureChecker<'k> {
+    pub key: &'k [u8],
+}
 
-impl Checker<'_> for SignatureChecker {
+impl Checker<'_> for SignatureChecker<'_> {
     const ID: &'static str = "request_signature";
-    const VERSION: u32 = 4;
+    const VERSION: u32 = 5;
     type Claim = RequestSignature;
     type Evidence = HttpExchange;
 
@@ -252,8 +257,6 @@ impl Checker<'_> for SignatureChecker {
         evidence: &[Item<HttpExchange>],
         deadline: Instant,
     ) -> Result<Verdict, CheckError> {
-        let key =
-            hex::decode(&claim.key_hex).map_err(|e| CheckError::InvalidClaim(e.to_string()))?;
         Ok(replay(evidence, deadline, |exchange| {
             let req = &exchange.request;
             // Header names are case-insensitive in HTTP, and HTTP/2 captures have them in lower case.
@@ -261,7 +264,7 @@ impl Checker<'_> for SignatureChecker {
                 .find(|h| h.name.eq_ignore_ascii_case(&claim.header))
                 .map(|h| &h.value)
                 .ok_or_else(|| format!("header `{}` missing", claim.header))?;
-            let mac = sign(claim.algorithm, &key, &signed_input(claim, req)?)?;
+            let mac = sign(claim.algorithm, self.key, &signed_input(claim, req)?)?;
             // Hex digits may be in either case; in base64 case is part of the value.
             let (want, same) = match claim.encoding {
                 SigEncoding::Hex => {
@@ -481,17 +484,25 @@ pub fn check_claim(
             run(&MemoryLayoutChecker, id, c, items, limit)
         }
         ClaimKind::RequestSignature(c) => {
-            let items = decode(EvidenceKind::HttpExchange, json, evidence, http_exchange).and_then(
-                |items| {
+            // The key travels with the captures as secret evidence; it is not a capture.
+            let captures: Vec<Raw<'_>> = (evidence.iter())
+                .filter(|(_, kind, _)| *kind != EvidenceKind::Secret)
+                .cloned()
+                .collect();
+            let items = decode(EvidenceKind::HttpExchange, json, &captures, http_exchange)
+                .and_then(|items| {
                     // A request the server turned down says nothing about how accepted ones are signed.
                     let rejected = |got: Option<u16>| {
                         let status = got.filter(|s| *s >= 400)?;
                         Some(format!("a request the server answered with {status}"))
                     };
                     about(&c.endpoint, rejected, items)
-                },
-            );
-            run(&SignatureChecker, id, c, items, limit)
+                });
+            let key = (evidence.iter())
+                .find(|(e, kind, _)| *e == c.key && *kind == EvidenceKind::Secret)
+                .map(|(_, _, bytes)| *bytes)
+                .ok_or_else(|| CheckError::MissingKey(c.key.clone()))?;
+            run(&SignatureChecker { key }, id, c, items, limit)
         }
         ClaimKind::ResponseSchema(c) => {
             let items = decode(EvidenceKind::HttpExchange, json, evidence, http_exchange).and_then(
@@ -564,7 +575,7 @@ mod tests {
             header: "X-Sig".into(),
             algorithm: SigAlgorithm::HmacSha1,
             encoding: SigEncoding::Base64,
-            key_hex: "00ff10".into(),
+            key: EvidenceId::of(KEY),
             signed: vec![],
         };
         let mac = sign(claim.algorithm, &[0x00, 0xff, 0x10], b"item=1")
@@ -585,7 +596,8 @@ mod tests {
             )
         };
         let held = |request| -> Result<bool, CheckError> {
-            let verdict = SignatureChecker.check(&claim, &[item(b"r", request)], soon())?;
+            let checker = SignatureChecker { key: KEY };
+            let verdict = checker.check(&claim, &[item(b"r", request)], soon())?;
             Ok(matches!(verdict, Verdict::Held { .. }))
         };
         assert!(held(request("x-sig", &good))?);
@@ -593,10 +605,11 @@ mod tests {
         Ok(())
     }
 
+    const KEY: &[u8] = &[0x00, 0xff, 0x10];
+    const OTHER_KEY: &[u8] = &[0x00, 0xff, 0x11];
+
     fn signed(claim: &RequestSignature, body: &str) -> Result<Vec<u8>, CheckError> {
-        let key =
-            hex::decode(&claim.key_hex).map_err(|e| CheckError::InvalidClaim(e.to_string()))?;
-        let mac = sign(claim.algorithm, &key, body.as_bytes()).map_err(CheckError::InvalidClaim)?;
+        let mac = sign(claim.algorithm, KEY, body.as_bytes()).map_err(CheckError::InvalidClaim)?;
         let header = (claim.header.as_str(), hex::encode(mac));
         let url = "https://game.example/score?session=abc";
         stored(&exchange(
@@ -614,9 +627,16 @@ mod tests {
         kind: EvidenceKind,
         evidence: &[Vec<u8>],
     ) -> Result<usize, CheckError> {
-        let raw: Vec<Raw<'_>> = (evidence.iter())
+        let mut raw: Vec<Raw<'_>> = (evidence.iter())
             .map(|bytes| (EvidenceId::of(bytes), kind, &bytes[..]))
             .collect();
+        // Signature claims cite their key as evidence; both keys are on hand.
+        if claims
+            .iter()
+            .all(|c| matches!(c, ClaimKind::RequestSignature(_)))
+        {
+            raw.extend([KEY, OTHER_KEY].map(|k| (EvidenceId::of(k), EvidenceKind::Secret, k)));
+        }
         let mut caught = 0;
         for claim in claims {
             let verdict = check_claim(&ClaimId::of(b"c"), claim, &raw, Duration::from_secs(5))?;
@@ -633,7 +653,7 @@ mod tests {
             header: "X-Sig".into(),
             algorithm: SigAlgorithm::HmacSha256,
             encoding: SigEncoding::Hex,
-            key_hex: "00ff10".into(),
+            key: EvidenceId::of(KEY),
             signed: vec![],
         };
         let requests = [signed(&truth, "score=10")?, signed(&truth, "score=9000")?];
@@ -643,7 +663,7 @@ mod tests {
             ClaimKind::RequestSignature(claim)
         };
         let seeded = [
-            wrong(|c| c.key_hex = "00ff11".into()),
+            wrong(|c| c.key = EvidenceId::of(OTHER_KEY)),
             wrong(|c| c.algorithm = SigAlgorithm::HmacSha1),
             wrong(|c| c.algorithm = SigAlgorithm::KeyedMd5),
             wrong(|c| c.encoding = SigEncoding::Base64),
@@ -814,7 +834,7 @@ mod tests {
             header: "X-Auth".into(),
             algorithm: SigAlgorithm::HmacSha256,
             encoding: SigEncoding::Hex,
-            key_hex: "00ff10".into(),
+            key: EvidenceId::of(KEY),
             signed: vec![
                 SignedPart::Header("x-timestamp".into()),
                 SignedPart::Text(".".into()),
@@ -852,7 +872,13 @@ mod tests {
             let bytes = capture(status)?;
             let raw = (EvidenceId::of(b"e"), EvidenceKind::HttpExchange, &bytes[..]);
             let claim = ClaimKind::RequestSignature(claim.clone());
-            Ok(check_claim(&id, &claim, &[raw], Duration::from_secs(5)))
+            let key = (EvidenceId::of(KEY), EvidenceKind::Secret, KEY);
+            Ok(check_claim(
+                &id,
+                &claim,
+                &[raw, key],
+                Duration::from_secs(5),
+            ))
         };
         assert!(matches!(run(&claim, 200)?, Ok(Verdict::Held { .. })));
         assert!(matches!(
@@ -1058,14 +1084,14 @@ mod tests {
             header: "X-Sig".into(),
             algorithm: SigAlgorithm::HmacSha256,
             encoding: SigEncoding::Hex,
-            key_hex: hex::encode("Jefe"),
+            key: EvidenceId::of(b"Jefe"),
             signed: vec![],
         };
         let sig = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
         let body = "what do ya want for nothing?";
         let req = exchange("/x", ("X-Sig", sig), body, 200, &serde_json::json!({}));
         assert_eq!(
-            SignatureChecker.check(&claim, &[item(b"r", req)], soon())?,
+            SignatureChecker { key: b"Jefe" }.check(&claim, &[item(b"r", req)], soon())?,
             Verdict::Held {
                 runs: NonZeroU64::MIN
             }

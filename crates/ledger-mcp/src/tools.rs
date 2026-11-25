@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use ledger_checkers::{CheckError, check_claim};
 use ledger_core::{
-    Body, Claim, ClaimId, CoreError, Endpoint, Event, EvidenceId, EvidenceKind, Header,
+    Body, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event, EvidenceId, EvidenceKind, Header,
     HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict, admit,
 };
 use ledger_store::{Snapshot, Store, StoreError};
@@ -107,6 +107,12 @@ impl From<CheckError> for Rejection {
                 id,
                 "The file is not in the format its kind requires.",
                 next,
+            ),
+            CheckError::MissingKey(id) => reject(
+                "key_missing",
+                id,
+                "The claim's key is not secret evidence in this ledger.",
+                "Add the key file with add_evidence kind=secret and cite its id as `key`.",
             ),
             CheckError::NotApplicable(id, what) => reject(
                 "evidence_not_applicable",
@@ -250,9 +256,28 @@ pub fn propose(store: &Store, mut claim: Claim, evidence: &[String]) -> Result<S
         premises.insert(premise.clone());
     }
     claim.premises = premises;
-    let evidence: Vec<EvidenceId> = (evidence.iter())
+    let mut evidence: Vec<EvidenceId> = (evidence.iter())
         .map(|text| only(ledger.evidence_starting(text), text, unknown_evidence).cloned())
         .collect::<Result<_, _>>()?;
+    // A signing key is cited by id, never written into the claim. It is read
+    // by every check of the claim, so it counts as evidence of that check.
+    if let ClaimKind::RequestSignature(signature) = &mut claim.kind {
+        const NEXT: &str =
+            "Add the key file with add_evidence kind=secret and cite its id as `key`.";
+        let text = signature.key.to_string();
+        let found = only(ledger.evidence_starting(&text), &text, |text| {
+            reject("key_unknown", text, "No evidence has this id.", NEXT)
+        });
+        let key = found?.clone();
+        if ledger.evidence_kind(&key) != Some(EvidenceKind::Secret) {
+            let message = "This evidence is not of kind secret.";
+            return Err(reject("key_not_secret", &key, message, NEXT));
+        }
+        if !evidence.is_empty() && !evidence.contains(&key) {
+            evidence.push(key.clone());
+        }
+        signature.key = key;
+    }
     let claim = admit(claim).map_err(StoreError::Core)?;
     let id = claim.get().id().map_err(StoreError::Core)?;
     let kind = claim.get().kind.clone();
@@ -753,13 +778,23 @@ mod tests {
             Ok(added.rsplit(' ').next().unwrap_or_default().to_owned())
         };
         let (request, garbage) = (add(&request)?, add(&garbage)?);
-        let signature = |endpoint: &str, key: &str| Claim {
+        let key_file = dir.path().join("key.bin");
+        std::fs::write(&key_file, [0x00, 0xff])?;
+        let key_path = key_file.to_str().ok_or("path")?;
+        let key =
+            add_evidence(&store, EvidenceKind::Secret, key_path).map_err(|r| r.to_string())?;
+        let key = key.rsplit(' ').next().unwrap_or_default().to_owned();
+        let cite = |text: &str| -> Result<EvidenceId, rmcp::serde_json::Error> {
+            rmcp::serde_json::from_value(rmcp::serde_json::Value::String(text.into()))
+        };
+        let (key, unknown_key, not_a_key) = (cite(&key)?, cite("0123abcd")?, cite(&request)?);
+        let signature = |endpoint: &str, key: &EvidenceId| Claim {
             kind: ClaimKind::RequestSignature(RequestSignature {
                 endpoint: endpoint.into(),
                 header: "X-Sig".into(),
                 algorithm: SigAlgorithm::HmacSha256,
                 encoding: SigEncoding::Hex,
-                key_hex: key.into(),
+                key: key.clone(),
                 signed: vec![],
             }),
             premises: BTreeSet::new(),
@@ -773,22 +808,15 @@ mod tests {
                 layout("T", 8, &[])?,
                 std::slice::from_ref(&request),
             )),
+            rejected(propose(&store, signature("POST /score", &key), &[garbage])),
             rejected(propose(
                 &store,
-                signature("POST /score", "00ff"),
-                &[garbage],
-            )),
-            rejected(propose(
-                &store,
-                signature("POST /purchase", "00ff"),
+                signature("POST /purchase", &key),
                 &[request],
             )),
-            rejected(propose(
-                &store,
-                signature("POST /score", "secret, not hex"),
-                &[],
-            )),
-            rejected(propose(&store, signature("/score", "00ff"), &[])),
+            rejected(propose(&store, signature("POST /score", &unknown_key), &[])),
+            rejected(propose(&store, signature("POST /score", &not_a_key), &[])),
+            rejected(propose(&store, signature("/score", &key), &[])),
             rejected(ask(&store, About::Claim, None, None, None)),
             rejected(ask(&store, About::Subject, None, None, None)),
             rejected(ask(&store, About::All, None, None, Some("0123abcd"))),

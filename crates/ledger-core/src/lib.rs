@@ -225,7 +225,9 @@ pub struct RequestSignature {
     pub header: String,
     pub algorithm: SigAlgorithm,
     pub encoding: SigEncoding,
-    pub key_hex: String,
+    /// Evidence of kind `secret` that holds the key's raw bytes. The key itself
+    /// is never part of a claim, the event log or a response.
+    pub key: EvidenceId,
     /// What is signed, in order, joined with nothing in between. Empty means the body alone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signed: Vec<SignedPart>,
@@ -385,8 +387,8 @@ pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
             if let Err(why) = Endpoint::parse(&s.endpoint) {
                 return bad(why);
             }
-            if s.header.is_empty() || hex::decode(&s.key_hex).is_err() {
-                return bad("signature needs a header name and a hex key");
+            if s.header.is_empty() {
+                return bad("signature needs a header name");
             }
             let empty = |p: &SignedPart| matches!(p, SignedPart::Header(t) | SignedPart::Text(t) if t.is_empty());
             if s.signed.iter().any(empty) {
@@ -419,6 +421,8 @@ pub enum EvidenceKind {
     CapturedExchange,
     /// One request and its response, as [`HttpExchange`].
     HttpExchange,
+    /// A signing key or other secret, as raw bytes. Cited by claims, never shown.
+    Secret,
 }
 
 /// One header line. A list of these, not a map: names repeat, and HTTP/2 captures
@@ -872,7 +876,7 @@ mod tests {
                 header: "X-Sig".into(),
                 algorithm: SigAlgorithm::HmacSha256,
                 encoding: SigEncoding::Hex,
-                key_hex: "00ff".into(),
+                key: EvidenceId::of(b"key"),
                 signed: vec![],
             }),
             premises: BTreeSet::new(),
