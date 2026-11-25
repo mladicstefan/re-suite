@@ -37,6 +37,10 @@ pub struct Item<E> {
 /// Parsed evidence formats (JSON) are refused above this size. Snapshots are only sliced, never parsed.
 pub const MAX_PARSED_EVIDENCE: usize = 16 << 20;
 
+/// Longest counterexample detail, in characters. Details are stored in the event log
+/// and shown to agents, so they must not grow with the evidence.
+pub const MAX_DETAIL: usize = 300;
+
 /// A check is a pure function of the claim, the evidence and the checker's
 /// version; only whether it finishes before `deadline` depends on the clock.
 pub trait Checker<'e> {
@@ -79,9 +83,16 @@ fn replay<E: Sync>(
         one(&it.data).err().map(|d| (it.id.clone(), d))
     });
     match failure {
-        Some((evidence, detail)) => Verdict::Refuted {
-            counterexample: Counterexample { evidence, detail },
-        },
+        Some((evidence, mut detail)) => {
+            // A validator can quote a whole response; a counterexample stays a sentence.
+            if let Some((cut, _)) = detail.char_indices().nth(MAX_DETAIL) {
+                detail.truncate(cut);
+                detail.push('…');
+            }
+            Verdict::Refuted {
+                counterexample: Counterexample { evidence, detail },
+            }
+        }
         None if late.load(Ordering::Relaxed) => Verdict::Inconclusive {
             reason: "time limit reached before all evidence was replayed".into(),
         },
@@ -710,6 +721,24 @@ mod tests {
         if let Err(e) = about(&schema("POST /nowhere"), &serde)? {
             assert!(!e.to_string().contains("include"), "{e}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn counterexample_details_are_bounded() -> Result<(), CheckError> {
+        // Seen in trial 3: the schema validator quoted a 3,000 character array.
+        let claim = ResponseSchema {
+            endpoint: "POST /p".into(),
+            status: 200,
+            schema: serde_json::json!({"properties": {"items": {"maxItems": 0}}}),
+        };
+        let long = serde_json::json!({"items": vec!["oran-berry"; 500]});
+        let capture = exchange("/p", ("a", "b"), "", 200, &long);
+        let verdict = SchemaChecker.check(&claim, &[item(b"e", capture)], soon())?;
+        let Verdict::Refuted { counterexample } = verdict else {
+            return Err(CheckError::InvalidClaim("expected a refutation".into()));
+        };
+        assert_eq!(counterexample.detail.chars().count(), MAX_DETAIL + 1);
         Ok(())
     }
 
