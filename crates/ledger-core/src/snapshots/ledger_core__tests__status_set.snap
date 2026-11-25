@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "statuses(&[404, 200]).sentence()"
+---
+`GET crates.io/api/v1/crates/{name}` only answers with 200, 404.

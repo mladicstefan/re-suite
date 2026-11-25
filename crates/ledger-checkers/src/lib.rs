@@ -500,11 +500,36 @@ impl Checker<'_> for HeaderChecker {
     }
 }
 
+pub struct StatusChecker;
+
+impl Checker<'_> for StatusChecker {
+    const ID: &'static str = "status_set";
+    const VERSION: u32 = 1;
+    type Claim = ledger_core::StatusSet;
+    type Evidence = HttpExchange;
+
+    fn check(
+        &self,
+        claim: &Self::Claim,
+        evidence: &[Item<HttpExchange>],
+        deadline: Instant,
+    ) -> Result<Verdict, CheckError> {
+        Ok(replay(evidence, deadline, |exchange| {
+            match exchange.response.as_ref().map(|r| r.status) {
+                Some(status) if claim.statuses.contains(&status) => Ok(()),
+                Some(status) => Err(format!("answered {status}")),
+                None => Err("was never answered".into()),
+            }
+        }))
+    }
+}
+
 /// The checker that `check_claim` runs for a claim, by id and version. With the
 /// claim and the evidence, this is what a recorded verdict is cached on.
 #[must_use]
 pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
     let (id, version) = match claim {
+        ClaimKind::StatusSet(_) => (StatusChecker::ID, StatusChecker::VERSION),
         ClaimKind::RequestBodySchema(_) => (BodySchemaChecker::ID, BodySchemaChecker::VERSION),
         ClaimKind::RequestHeader(_) => (HeaderChecker::ID, HeaderChecker::VERSION),
         ClaimKind::MemoryLayout(_) => (MemoryLayoutChecker::ID, MemoryLayoutChecker::VERSION),
@@ -520,110 +545,148 @@ pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
 /// Saved evidence as stored: its id, its declared kind and its bytes.
 pub type Raw<'e> = (EvidenceId, EvidenceKind, &'e [u8]);
 
+fn decode<'e, E>(
+    want: EvidenceKind,
+    max: usize,
+    raw: &[Raw<'e>],
+    parse: impl Fn(&'e [u8]) -> Result<E, String>,
+) -> Result<Vec<Item<E>>, CheckError> {
+    raw.iter()
+        .map(|(id, kind, bytes)| {
+            if *kind != want {
+                return Err(CheckError::WrongEvidence(*kind));
+            }
+            if bytes.len() > max {
+                return Err(CheckError::TooLarge(id.clone(), bytes.len(), max));
+            }
+            let data = parse(bytes).map_err(|e| CheckError::Malformed(id.clone(), e))?;
+            Ok(Item {
+                id: id.clone(),
+                size: bytes.len(),
+                data,
+            })
+        })
+        .collect()
+}
+
+/// The evidence as captures of one endpoint: each must be an HTTP exchange that
+/// belongs to it, and `other_status` says which responses the claim is not about.
+fn exchanges(
+    evidence: &[Raw<'_>],
+    endpoint: &str,
+    other_status: impl Fn(Option<u16>) -> Option<String>,
+) -> Result<Vec<Item<HttpExchange>>, CheckError> {
+    let decoded = decode(
+        EvidenceKind::HttpExchange,
+        MAX_PARSED_EVIDENCE,
+        evidence,
+        http_exchange,
+    );
+    decoded.and_then(|items| about(endpoint, other_status, items))
+}
+
+/// The evidence as memory snapshots, which are only sliced, never parsed.
+fn snapshots<'e>(evidence: &[Raw<'e>]) -> Result<Vec<Item<&'e [u8]>>, CheckError> {
+    decode(EvidenceKind::MemorySnapshot, usize::MAX, evidence, Ok)
+}
+
+/// Runs one checker inside a trace span, giving it `limit` to finish.
+fn run<'e, C: Checker<'e>>(
+    checker: &C,
+    id: &ClaimId,
+    claim: &C::Claim,
+    evidence: Result<Vec<Item<C::Evidence>>, CheckError>,
+    limit: Duration,
+) -> Result<Verdict, CheckError> {
+    let span = tracing::info_span!("check", claim = %id, checker = C::ID, version = C::VERSION);
+    let _entered = span.enter();
+    let start = Instant::now();
+    let verdict = checker.check(claim, &evidence?, start + limit);
+    // Only the outcome is logged: details can quote evidence.
+    let outcome = match &verdict {
+        Ok(Verdict::Held { .. }) => "held",
+        Ok(Verdict::Refuted { .. }) => "refuted",
+        Ok(Verdict::Inconclusive { .. }) => "inconclusive",
+        Err(_) => "error",
+    };
+    tracing::info!(elapsed = ?start.elapsed(), outcome, "checked");
+    verdict
+}
+
 /// Decodes raw evidence for the claim's kind and runs the matching checker
 /// inside a trace span, giving it `limit` to finish.
 ///
 /// # Errors
-/// Evidence of the wrong kind, oversized or undecodable evidence, or an uncheckable claim.
+/// Evidence of the wrong kind, oversized or undecodable evidence, evidence that
+/// is not about the claim, or an uncheckable claim.
 pub fn check_claim(
     id: &ClaimId,
     claim: &ClaimKind,
     evidence: &[Raw<'_>],
     limit: Duration,
 ) -> Result<Verdict, CheckError> {
-    fn decode<'e, E>(
-        want: EvidenceKind,
-        max: usize,
-        raw: &[Raw<'e>],
-        parse: impl Fn(&'e [u8]) -> Result<E, String>,
-    ) -> Result<Vec<Item<E>>, CheckError> {
-        raw.iter()
-            .map(|(id, kind, bytes)| {
-                if *kind != want {
-                    return Err(CheckError::WrongEvidence(*kind));
-                }
-                if bytes.len() > max {
-                    return Err(CheckError::TooLarge(id.clone(), bytes.len(), max));
-                }
-                let data = parse(bytes).map_err(|e| CheckError::Malformed(id.clone(), e))?;
-                Ok(Item {
-                    id: id.clone(),
-                    size: bytes.len(),
-                    data,
-                })
-            })
-            .collect()
-    }
-    fn run<'e, C: Checker<'e>>(
-        checker: &C,
-        id: &ClaimId,
-        claim: &C::Claim,
-        evidence: Result<Vec<Item<C::Evidence>>, CheckError>,
-        limit: Duration,
-    ) -> Result<Verdict, CheckError> {
-        let span = tracing::info_span!("check", claim = %id, checker = C::ID, version = C::VERSION);
-        let _entered = span.enter();
-        let start = Instant::now();
-        let verdict = checker.check(claim, &evidence?, start + limit);
-        // Only the outcome is logged: details can quote evidence.
-        let outcome = match &verdict {
-            Ok(Verdict::Held { .. }) => "held",
-            Ok(Verdict::Refuted { .. }) => "refuted",
-            Ok(Verdict::Inconclusive { .. }) => "inconclusive",
-            Err(_) => "error",
-        };
-        tracing::info!(elapsed = ?start.elapsed(), outcome, "checked");
-        verdict
-    }
-    let json = MAX_PARSED_EVIDENCE;
+    let any_status = |_: Option<u16>| None;
     match claim {
-        ClaimKind::RequestBodySchema(c) => {
-            let items = decode(EvidenceKind::HttpExchange, json, evidence, http_exchange)
-                .and_then(|items| about(&c.endpoint, |_| None, items));
-            run(&BodySchemaChecker, id, c, items, limit)
+        ClaimKind::StatusSet(c) => {
+            // A request that was never answered says nothing about which statuses come back.
+            let unanswered = |got: Option<u16>| {
+                got.is_none()
+                    .then(|| "a request with no response".to_owned())
+            };
+            run(
+                &StatusChecker,
+                id,
+                c,
+                exchanges(evidence, &c.endpoint, unanswered),
+                limit,
+            )
         }
-        ClaimKind::RequestHeader(c) => {
-            let items = decode(EvidenceKind::HttpExchange, json, evidence, http_exchange)
-                .and_then(|items| about(&c.endpoint, |_| None, items));
-            run(&HeaderChecker, id, c, items, limit)
-        }
-        ClaimKind::MemoryLayout(c) => {
-            let items = decode(EvidenceKind::MemorySnapshot, usize::MAX, evidence, Ok);
-            run(&MemoryLayoutChecker, id, c, items, limit)
-        }
+        ClaimKind::RequestBodySchema(c) => run(
+            &BodySchemaChecker,
+            id,
+            c,
+            exchanges(evidence, &c.endpoint, any_status),
+            limit,
+        ),
+        ClaimKind::RequestHeader(c) => run(
+            &HeaderChecker,
+            id,
+            c,
+            exchanges(evidence, &c.endpoint, any_status),
+            limit,
+        ),
+        ClaimKind::MemoryLayout(c) => run(&MemoryLayoutChecker, id, c, snapshots(evidence), limit),
         ClaimKind::RequestSignature(c) => {
             // The key travels with the captures as secret evidence; it is not a capture.
             let captures: Vec<Raw<'_>> = (evidence.iter())
                 .filter(|(_, kind, _)| *kind != EvidenceKind::Secret)
                 .cloned()
                 .collect();
-            let items = decode(EvidenceKind::HttpExchange, json, &captures, http_exchange)
-                .and_then(|items| {
-                    // A request the server turned down says nothing about how accepted ones are signed.
-                    let rejected = |got: Option<u16>| {
-                        let status = got.filter(|s| *s >= 400)?;
-                        Some(format!("a request the server answered with {status}"))
-                    };
-                    about(&c.endpoint, rejected, items)
-                });
+            // A request the server turned down says nothing about how accepted ones are signed.
+            let rejected = |got: Option<u16>| {
+                let status = got.filter(|s| *s >= 400)?;
+                Some(format!("a request the server answered with {status}"))
+            };
             let key = (evidence.iter())
                 .find(|(e, kind, _)| *e == c.key && *kind == EvidenceKind::Secret)
                 .map(|(_, _, bytes)| *bytes)
                 .ok_or_else(|| CheckError::MissingKey(c.key.clone()))?;
+            let items = exchanges(&captures, &c.endpoint, rejected);
             run(&SignatureChecker { key }, id, c, items, limit)
         }
         ClaimKind::ResponseSchema(c) => {
-            let items = decode(EvidenceKind::HttpExchange, json, evidence, http_exchange).and_then(
-                |items| {
-                    let other = |got: Option<u16>| match got {
-                        Some(status) if status == c.status => None,
-                        Some(status) => Some(format!("a {status} response")),
-                        None => Some("a request with no response".into()),
-                    };
-                    about(&c.endpoint, other, items)
-                },
-            );
-            run(&SchemaChecker, id, c, items, limit)
+            let other = |got: Option<u16>| match got {
+                Some(status) if status == c.status => None,
+                Some(status) => Some(format!("a {status} response")),
+                None => Some("a request with no response".into()),
+            };
+            run(
+                &SchemaChecker,
+                id,
+                c,
+                exchanges(evidence, &c.endpoint, other),
+                limit,
+            )
         }
     }
 }
@@ -1108,6 +1171,58 @@ mod tests {
         assert!(
             matches!(run(asks, &form)?, Verdict::Refuted { counterexample } if counterexample.detail.contains("not JSON"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn status_claims_hold_refute_and_skip_unanswered_requests() -> Result<(), CheckError> {
+        let claim = |statuses: &[u16]| {
+            ClaimKind::StatusSet(ledger_core::StatusSet {
+                endpoint: "POST /crates/{name}".into(),
+                statuses: statuses.iter().copied().collect(),
+            })
+        };
+        let found = stored(&exchange(
+            "/crates/serde",
+            ("a", "b"),
+            "",
+            200,
+            &serde_json::json!({}),
+        ))?;
+        let missing = stored(&exchange(
+            "/crates/nope",
+            ("a", "b"),
+            "",
+            404,
+            &serde_json::json!({}),
+        ))?;
+        let mut unanswered = exchange("/crates/slow", ("a", "b"), "", 200, &serde_json::json!({}));
+        unanswered.response = None;
+        let unanswered = stored(&unanswered)?;
+        let run = |claim: &ClaimKind, captures: &[&Vec<u8>]| {
+            let raw: Vec<Raw<'_>> = (captures.iter())
+                .map(|bytes| {
+                    (
+                        EvidenceId::of(bytes),
+                        EvidenceKind::HttpExchange,
+                        &bytes[..],
+                    )
+                })
+                .collect();
+            check_claim(&ClaimId::of(b"c"), claim, &raw, Duration::from_secs(5))
+        };
+        assert!(matches!(
+            run(&claim(&[200, 404]), &[&found, &missing])?,
+            Verdict::Held { .. }
+        ));
+        assert!(matches!(
+            run(&claim(&[200]), &[&found, &missing])?,
+            Verdict::Refuted { counterexample } if counterexample.detail == "answered 404"
+        ));
+        assert!(matches!(
+            run(&claim(&[200]), &[&unanswered]),
+            Err(CheckError::NotApplicable(..))
+        ));
         Ok(())
     }
 

@@ -280,9 +280,18 @@ pub struct RequestBodySchema {
     pub schema: serde_json::Value,
 }
 
+/// An endpoint only ever answers with these statuses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StatusSet {
+    /// `METHOD [host]/path`, see [`Endpoint`].
+    pub endpoint: String,
+    pub statuses: BTreeSet<u16>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimKind {
+    StatusSet(StatusSet),
     RequestBodySchema(RequestBodySchema),
     RequestHeader(RequestHeader),
     MemoryLayout(MemoryLayout),
@@ -312,6 +321,7 @@ impl Claim {
     #[must_use]
     pub const fn subject(&self) -> &str {
         match &self.kind {
+            ClaimKind::StatusSet(s) => s.endpoint.as_str(),
             ClaimKind::RequestBodySchema(b) => b.endpoint.as_str(),
             ClaimKind::RequestHeader(h) => h.endpoint.as_str(),
             ClaimKind::MemoryLayout(m) => m.type_name.as_str(),
@@ -324,6 +334,14 @@ impl Claim {
     #[must_use]
     pub fn sentence(&self) -> String {
         match &self.kind {
+            ClaimKind::StatusSet(s) => {
+                let statuses: Vec<String> = s.statuses.iter().map(u16::to_string).collect();
+                format!(
+                    "`{}` only answers with {}.",
+                    s.endpoint,
+                    statuses.join(", ")
+                )
+            }
             ClaimKind::RequestBodySchema(b) => {
                 format!(
                     "`{}` request bodies match {}.",
@@ -450,6 +468,15 @@ fn accepts_everything(schema: &serde_json::Value) -> bool {
 pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
     let bad = |m: &str| Err(CoreError::Inadmissible(m.to_owned()));
     match &claim.kind {
+        ClaimKind::StatusSet(s) => {
+            if let Err(why) = Endpoint::parse(&s.endpoint) {
+                return bad(why);
+            }
+            if s.statuses.is_empty() || !s.statuses.iter().all(|status| (100..600).contains(status))
+            {
+                return bad("a status claim needs at least one status, each from 100 to 599");
+            }
+        }
         ClaimKind::RequestBodySchema(b) => {
             if let Err(why) = Endpoint::parse(&b.endpoint) {
                 return bad(why);
@@ -1368,6 +1395,16 @@ mod tests {
                 .contains("signed")
         );
         insta::assert_snapshot!("response_schema", schema().sentence());
+        let statuses = |statuses: &[u16]| Claim {
+            kind: ClaimKind::StatusSet(StatusSet {
+                endpoint: "GET crates.io/api/v1/crates/{name}".into(),
+                statuses: statuses.iter().copied().collect(),
+            }),
+            premises: BTreeSet::new(),
+        };
+        insta::assert_snapshot!("status_set", statuses(&[404, 200]).sentence());
+        assert!(admit(statuses(&[])).is_err());
+        assert!(admit(statuses(&[200, 99])).is_err());
         let body = |schema| Claim {
             kind: ClaimKind::RequestBodySchema(RequestBodySchema {
                 endpoint: "POST search.example/1/indexes/{index}/query".into(),
