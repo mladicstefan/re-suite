@@ -82,8 +82,10 @@ another status, another host, page-load noise, another method.
   six page-load captures, and a forecast claim scoped to `?current` can
   require `current` again and holds on the three captures that asked
   for it. Captures that do not meet the conditions are refused.
-- **Open: a signature claim has no status.** A capture of a request the
-  server rejected would refute a true claim about accepted requests.
+- **Fixed afterwards: a signature claim had no status.** A capture of a
+  request the server rejected would have refuted a true claim about
+  accepted requests. Captures answered with 400 or above are now refused
+  as not applicable.
 - **Fixed afterwards: the agent had to know which captures belong to an
   endpoint.** `add_evidence` now takes a HAR file and stores one piece
   of evidence per entry, and `ask about=evidence` lists the captures of

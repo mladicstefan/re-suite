@@ -82,9 +82,11 @@ Four results were wrong, two in each direction.
 
 ## Other findings
 
-- **A signature claim can only say "MAC of the body".** Timestamps,
-  nonces, paths and query strings in the signed input are common and
-  cannot be expressed.
+- **Fixed afterwards: a signature claim could only say "MAC of the
+  body".** A claim can now list what is signed, in order: the body, a
+  header's value, fixed text, the method, the path, the query string.
+  The session endpoint's claim (timestamp header, a dot, the body) holds
+  on its eight captures.
 - **Schema sentences are all alike.** Every schema claim reads "Responses
   from X match the recorded JSON Schema", so the ten wrong schema claims
   and the true one cannot be told apart in a list.

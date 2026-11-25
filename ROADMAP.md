@@ -509,8 +509,6 @@ honestly.
 | How much of x86-64 and AArch64 does RzIL lift, and how often does it disagree with a second lifter? | End of Phase 2 |
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
 | A request-signature claim carries its key (`key_hex`), so the key is in the event log and in the claim's hash, while section 7 says secrets are stored as evidence. Move the key to evidence and have the claim cite it? | Before the trial run |
-| A request-signature claim has no status, so a capture of a request the server rejected would refute a true claim. Bind signature claims to accepted requests? | Phase 2, hardening |
-| A request-signature claim can only say "MAC of the body". Which signed inputs (timestamp, nonce, path, query) should the kind be able to express? | Phase 2, claim kinds |
 | Every response-schema claim has the same sentence. What should it say about the schema so a human can tell two claims apart? | Phase 3, sentences |
 | How far does VerifiedIDA's standard overlap, and should we build on it or interoperate? | Before the open format in Phase 6 |
 

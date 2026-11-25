@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: stamped.sentence()
+---
+`POST /api/v2/score` requests carry a HmacSha256 signature of header `X-Timestamp` + "." + the body in header `X-Sig`, Hex encoded.

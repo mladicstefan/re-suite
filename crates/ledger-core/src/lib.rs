@@ -198,7 +198,26 @@ pub enum SigEncoding {
     Base64,
 }
 
-/// A request header carries a signature over the request body.
+/// One piece of what a request signature is computed over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SignedPart {
+    /// The request body.
+    Body,
+    /// The value of a request header, such as a timestamp or a nonce.
+    Header(String),
+    /// These exact characters, such as a separator.
+    Text(String),
+    /// The request method.
+    Method,
+    /// The URL's path, without the query string.
+    Path,
+    /// The URL's query string, without the `?`.
+    Query,
+}
+
+/// A request header carries a signature over the request body, or over the
+/// parts listed in `signed`. It is a claim about requests the server accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RequestSignature {
     /// `METHOD [host]/path`, see [`Endpoint`].
@@ -207,6 +226,27 @@ pub struct RequestSignature {
     pub algorithm: SigAlgorithm,
     pub encoding: SigEncoding,
     pub key_hex: String,
+    /// What is signed, in order, joined with nothing in between. Empty means the body alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signed: Vec<SignedPart>,
+}
+
+impl RequestSignature {
+    /// What is signed, in words.
+    fn signed_input(&self) -> String {
+        let part = |p: &SignedPart| match p {
+            SignedPart::Body => "the body".to_owned(),
+            SignedPart::Header(name) => format!("header `{name}`"),
+            SignedPart::Text(text) => format!("{text:?}"),
+            SignedPart::Method => "the method".to_owned(),
+            SignedPart::Path => "the path".to_owned(),
+            SignedPart::Query => "the query string".to_owned(),
+        };
+        if self.signed.is_empty() {
+            return "the body".to_owned();
+        }
+        self.signed.iter().map(part).collect::<Vec<_>>().join(" + ")
+    }
 }
 
 /// Responses with one status from an endpoint conform to a JSON Schema.
@@ -278,8 +318,12 @@ impl Claim {
                 )
             }
             ClaimKind::RequestSignature(s) => format!(
-                "`{}` requests carry a {:?} signature of the body in header `{}`, {:?} encoded.",
-                s.endpoint, s.algorithm, s.header, s.encoding
+                "`{}` requests carry a {:?} signature of {} in header `{}`, {:?} encoded.",
+                s.endpoint,
+                s.algorithm,
+                s.signed_input(),
+                s.header,
+                s.encoding
             ),
             ClaimKind::ResponseSchema(r) => {
                 format!(
@@ -343,6 +387,10 @@ pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
             }
             if s.header.is_empty() || hex::decode(&s.key_hex).is_err() {
                 return bad("signature needs a header name and a hex key");
+            }
+            let empty = |p: &SignedPart| matches!(p, SignedPart::Header(t) | SignedPart::Text(t) if t.is_empty());
+            if s.signed.iter().any(empty) {
+                return bad("a signed header or text must not be empty");
             }
         }
         ClaimKind::ResponseSchema(r) => {
@@ -825,6 +873,7 @@ mod tests {
                 algorithm: SigAlgorithm::HmacSha256,
                 encoding: SigEncoding::Hex,
                 key_hex: "00ff".into(),
+                signed: vec![],
             }),
             premises: BTreeSet::new(),
         }
@@ -1085,6 +1134,21 @@ mod tests {
         };
         insta::assert_snapshot!("memory_layout_bare", bare.sentence());
         insta::assert_snapshot!("request_signature", signature().sentence());
+        let mut stamped = signature();
+        if let ClaimKind::RequestSignature(s) = &mut stamped.kind {
+            s.signed = vec![
+                SignedPart::Header("X-Timestamp".into()),
+                SignedPart::Text(".".into()),
+                SignedPart::Body,
+            ];
+        }
+        insta::assert_snapshot!("request_signature_parts", stamped.sentence());
+        // A claim that signs the body alone is written, and hashed, as before.
+        assert!(
+            !serde_json::to_string(&signature())
+                .unwrap_or_default()
+                .contains("signed")
+        );
         insta::assert_snapshot!("response_schema", schema().sentence());
     }
 

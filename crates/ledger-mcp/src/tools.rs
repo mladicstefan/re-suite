@@ -760,6 +760,7 @@ mod tests {
                 algorithm: SigAlgorithm::HmacSha256,
                 encoding: SigEncoding::Hex,
                 key_hex: key.into(),
+                signed: vec![],
             }),
             premises: BTreeSet::new(),
         };
