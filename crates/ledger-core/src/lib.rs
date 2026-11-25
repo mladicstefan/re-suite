@@ -259,13 +259,14 @@ impl Claim {
                     Some(kind) => format!("{} at +{:#x} ({kind})", f.name, f.offset),
                     None => format!("{} at +{:#x}", f.name, f.offset),
                 };
+                // The count comes first: lists cut long sentences, and it must survive the cut.
                 format!(
-                    "`{}` is {} bytes: {}. Contents checked for {} of {} fields.",
+                    "`{}` is {} bytes, contents checked for {} of {} fields: {}.",
                     m.type_name,
                     m.size,
-                    m.fields.iter().map(field).collect::<Vec<_>>().join(", "),
                     m.fields.iter().filter(|f| f.is.is_some()).count(),
-                    m.fields.len()
+                    m.fields.len(),
+                    m.fields.iter().map(field).collect::<Vec<_>>().join(", ")
                 )
             }
             ClaimKind::RequestSignature(s) => format!(
