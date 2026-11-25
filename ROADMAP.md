@@ -487,7 +487,6 @@ honestly.
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
 | One flush on the current disk (btrfs on dm-crypt) takes 6.2 ms, so durable `propose` has a 7.2 ms median against the 2 ms budget, and 961 events/s against 1,000. Move the ledger to a filesystem with faster flushes, relax the budget for this machine, or allow `synchronous=NORMAL` for interactive writes? | Before the Phase 1 Store box is ticked |
 | A request-signature claim carries its key (`key_hex`), so the key is in the event log and in the claim's hash, while section 7 says secrets are stored as evidence. Move the key to evidence and have the claim cite it? | Before the trial run |
-| A `text` field holds on one printable character before a NUL, which let one seeded wrong claim through in trial 1. Give it a minimum length, or leave it to the vacuity checks? | Phase 2, hardening |
 | How far does VerifiedIDA's standard overlap, and should we build on it or interoperate? | Before the open format in Phase 6 |
 
 ## 14. Rules for whoever implements a milestone

@@ -69,9 +69,10 @@ Every call started a fresh server process on the same ledger file, about
   were not in offset order. No earlier test had such a claim.
 - **Fixed: the row cut off "contents checked for N of M fields".** The
   count now comes before the field list.
-- **Open: `text` is weak.** One printable character before a NUL is
-  enough. A minimum length, or a vacuity check, would have caught the
-  one miss.
+- **Fixed afterwards: `text` was weak.** One printable character before a
+  NUL was enough. `text` now takes a minimum length and refuses a string
+  of spaces, which refutes the one miss. The session record still shows
+  the old form, `"is": "text"`, which no longer parses.
 - **Open: `ask about=affected` lists refuted dependents too**, which
   would not be "put on hold" by anything.
 - **Open: adding evidence is one call per file.** 786 calls took most of

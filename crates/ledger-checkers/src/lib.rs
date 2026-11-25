@@ -91,7 +91,7 @@ pub struct MemoryLayoutChecker;
 
 impl<'e> Checker<'e> for MemoryLayoutChecker {
     const ID: &'static str = "memory_layout";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     type Claim = MemoryLayout;
     type Evidence = &'e [u8];
 
@@ -202,19 +202,20 @@ fn field_holds(kind: &FieldKind, bytes: &[u8]) -> Result<(), String> {
                 ))
             }
         }
-        FieldKind::Text => {
+        FieldKind::Text { min } => {
             let text = bytes.split(|b| *b == 0).next().unwrap_or_default();
-            if text.is_empty() {
-                Err("is empty: its first byte is NUL".into())
-            } else if text.len() == bytes.len() {
+            let shown = String::from_utf8_lossy(&text[..text.len().min(16)]);
+            if text.len() == bytes.len() {
                 Err("has no terminating NUL".into())
-            } else if text.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
-                Ok(())
-            } else {
+            } else if !text.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
                 Err(format!(
                     "is not printable text (starts {})",
                     &hex[..hex.len().min(16)]
                 ))
+            } else if (text.len() as u64) < *min || !text.iter().any(u8::is_ascii_graphic) {
+                Err(format!("is {shown:?}, not text of {min}+ characters"))
+            } else {
+                Ok(())
             }
         }
         FieldKind::Zero => match bytes.iter().position(|b| *b != 0) {
@@ -491,6 +492,15 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn a_lone_space_is_not_text() {
+        // The miss of trial 1: a record header `20 00 ..` read as the string " ".
+        let field = [0x20, 0x00, 0x80, 0x07, b'c', b'1', b'a', b'0'];
+        assert!(field_holds(&FieldKind::Text { min: 1 }, &field).is_err());
+        assert!(field_holds(&FieldKind::Text { min: 3 }, b"c1a0\0\xff\xff\xff").is_ok());
+        assert!(field_holds(&FieldKind::Text { min: 5 }, b"c1a0\0\xff\xff\xff").is_err());
+    }
+
     /// A made-up save header: magic, version 113, a size, a float time, a map name,
     /// padding and a pointer.
     fn save_header(size: u32, time: f32, map: [u8; 8]) -> Vec<u8> {
@@ -538,7 +548,7 @@ mod tests {
                     max: 100_000,
                 },
             ),
-            field("map", 16, 8, FieldKind::Text),
+            field("map", 16, 8, FieldKind::Text { min: 3 }),
             field("pad", 24, 4, FieldKind::Zero),
             field(
                 "next",
@@ -578,7 +588,8 @@ mod tests {
                     max: 100_000,
                 },
             ),
-            wrong(4, 12, FieldKind::Text),
+            wrong(4, 12, FieldKind::Text { min: 1 }),
+            wrong(4, 16, FieldKind::Text { min: 6 }),
             wrong(5, 20, FieldKind::Zero),
             wrong(
                 6,

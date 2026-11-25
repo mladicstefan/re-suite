@@ -83,8 +83,9 @@ pub enum FieldKind {
     OneOf(BTreeSet<u64>),
     /// Null, or an address of 4 or 8 bytes within `min..=max`.
     Pointer { min: u64, max: u64 },
-    /// At least one printable ASCII character, then a NUL inside the field.
-    Text,
+    /// At least `min` printable ASCII characters, not all spaces, then a NUL
+    /// inside the field.
+    Text { min: u64 },
     /// Every byte zero: padding or a reserved field.
     Zero,
 }
@@ -134,7 +135,10 @@ impl FieldKind {
                 () if values.is_empty() || values.iter().any(|v| *v > top) => Err(empty),
                 () => Ok(()),
             },
-            Self::Text | Self::Zero => Ok(()),
+            Self::Text { min } if *min == 0 || *min >= len => {
+                Err("`text` needs a `min` of at least 1 that leaves room for the NUL")
+            }
+            Self::Text { .. } | Self::Zero => Ok(()),
         }
     }
 }
@@ -153,7 +157,7 @@ impl fmt::Display for FieldKind {
                 write!(f, "one of {}", values.join(", "))
             }
             Self::Pointer { min, max } => write!(f, "null or address {min:#x} to {max:#x}"),
-            Self::Text => f.write_str("text"),
+            Self::Text { min } => write!(f, "text of {min}+ characters"),
             Self::Zero => f.write_str("zero"),
         }
     }
@@ -720,7 +724,7 @@ mod tests {
                     max: 0x7fff_ffff_ffff,
                 },
             ),
-            typed(12, FieldKind::Text),
+            typed(12, FieldKind::Text { min: 3 }),
             typed(3, FieldKind::Zero),
         ];
         for claim in good {
@@ -757,6 +761,8 @@ mod tests {
                     max: u64::MAX,
                 },
             ),
+            typed(12, FieldKind::Text { min: 0 }),
+            typed(12, FieldKind::Text { min: 12 }),
         ];
         for claim in bad {
             assert!(admit(claim.clone()).is_err(), "{claim:?}");
