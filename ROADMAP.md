@@ -508,7 +508,6 @@ honestly.
 | Which anchor survives real version changes with the fewest false matches? | Phase 2, version reruns |
 | How much of x86-64 and AArch64 does RzIL lift, and how often does it disagree with a second lifter? | End of Phase 2 |
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
-| Every response-schema claim has the same sentence. What should it say about the schema so a human can tell two claims apart? | Phase 3, sentences |
 | How far does VerifiedIDA's standard overlap, and should we build on it or interoperate? | Before the open format in Phase 6 |
 
 ## 14. Rules for whoever implements a milestone

@@ -95,5 +95,7 @@ another status, another host, page-load noise, another method.
   login do not sign requests, so the signature kind was only exercised
   on the simulation. The Algolia search sends an API key in a header,
   which is a different kind of claim.
-- **Still open from trial 2:** schema sentences are all alike, and one
-  counterexample per check.
+- **Fixed afterwards: schema sentences were all alike.** A sentence now
+  carries the start of the schema's hash and how many properties it
+  names and requires.
+- **Still open from trial 2:** one counterexample per check.

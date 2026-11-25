@@ -328,9 +328,21 @@ impl Claim {
                 s.encoding
             ),
             ClaimKind::ResponseSchema(r) => {
+                // Two schema claims for one endpoint must not read alike: the print is
+                // the start of the schema's hash, and the counts say how much it asks.
+                let print = blake3::hash(r.schema.to_string().as_bytes()).to_hex();
+                let count = |key: &str| match r.schema.get(key) {
+                    Some(serde_json::Value::Object(map)) => map.len(),
+                    Some(serde_json::Value::Array(list)) => list.len(),
+                    _ => 0,
+                };
                 format!(
-                    "{} responses to `{}` match the recorded JSON Schema.",
-                    r.status, r.endpoint
+                    "{} responses to `{}` match JSON Schema {}: {} properties, {} required.",
+                    r.status,
+                    r.endpoint,
+                    &print[..8],
+                    count("properties"),
+                    count("required")
                 )
             }
         }
@@ -352,6 +364,32 @@ impl<'de> Deserialize<'de> for WellFormed<Claim> {
     // Replayed events are re-admitted, so stored data never bypasses `admit`.
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         admit(Claim::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Whether a JSON Schema accepts every value, so that no response could refute it:
+/// `true`, or an object with nothing but annotations and properties that
+/// themselves accept everything.
+fn accepts_everything(schema: &serde_json::Value) -> bool {
+    const ANNOTATIONS: [&str; 8] = [
+        "$schema",
+        "$id",
+        "$comment",
+        "title",
+        "description",
+        "default",
+        "examples",
+        "deprecated",
+    ];
+    match schema {
+        serde_json::Value::Bool(accepts) => *accepts,
+        serde_json::Value::Object(keywords) => keywords.iter().all(|(key, value)| match value {
+            serde_json::Value::Object(properties) if key == "properties" => {
+                properties.values().all(accepts_everything)
+            }
+            _ => ANNOTATIONS.contains(&key.as_str()),
+        }),
+        _ => false,
     }
 }
 
@@ -402,6 +440,11 @@ pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
             if !(100..600).contains(&r.status) || !(r.schema.is_object() || r.schema.is_boolean()) {
                 return bad(
                     "response schema needs a status of 100 to 599 and an object or boolean schema",
+                );
+            }
+            if accepts_everything(&r.schema) {
+                return bad(
+                    "this schema accepts every response, so nothing could refute it; say what a response must have",
                 );
             }
         }
@@ -991,6 +1034,37 @@ mod tests {
             assert!(Endpoint::parse(bad).is_err(), "{bad}");
         }
         Ok(())
+    }
+
+    #[test]
+    fn admit_refuses_schemas_that_say_nothing() {
+        let claim = |schema: serde_json::Value| Claim {
+            kind: ClaimKind::ResponseSchema(ResponseSchema {
+                endpoint: "GET /profile".into(),
+                status: 200,
+                schema,
+            }),
+            premises: BTreeSet::new(),
+        };
+        let nothing = [
+            serde_json::json!(true),
+            serde_json::json!({}),
+            serde_json::json!({"title": "Profile", "description": "a profile"}),
+            serde_json::json!({"properties": {"id": {}, "name": true}}),
+        ];
+        for schema in nothing {
+            assert!(admit(claim(schema.clone())).is_err(), "{schema}");
+        }
+        let something = [
+            serde_json::json!(false),
+            serde_json::json!({"type": "object"}),
+            serde_json::json!({"required": ["id"]}),
+            serde_json::json!({"properties": {"id": {"type": "integer"}}}),
+            serde_json::json!({"properties": {"id": true}, "additionalProperties": false}),
+        ];
+        for schema in something {
+            assert!(admit(claim(schema.clone())).is_ok(), "{schema}");
+        }
     }
 
     #[test]
