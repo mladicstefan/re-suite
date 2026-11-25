@@ -8,8 +8,8 @@ use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
 use ledger_core::{
     CapturedExchange, CapturedRequest, ClaimId, ClaimKind, Counterexample, EvidenceId,
-    EvidenceKind, MemoryLayout, RequestSignature, ResponseSchema, SigAlgorithm, SigEncoding,
-    Verdict,
+    EvidenceKind, FieldKind, MemoryLayout, RequestSignature, ResponseSchema, SigAlgorithm,
+    SigEncoding, Verdict,
 };
 use md5::Digest as _;
 use rayon::prelude::*;
@@ -91,7 +91,7 @@ pub struct MemoryLayoutChecker;
 
 impl<'e> Checker<'e> for MemoryLayoutChecker {
     const ID: &'static str = "memory_layout";
-    const VERSION: u32 = 1;
+    const VERSION: u32 = 2;
     type Claim = MemoryLayout;
     type Evidence = &'e [u8];
 
@@ -101,7 +101,6 @@ impl<'e> Checker<'e> for MemoryLayoutChecker {
         evidence: &[Item<&'e [u8]>],
         deadline: Instant,
     ) -> Result<Verdict, CheckError> {
-        // shortcut: only checks the snapshot covers `size`; per-field value checks come with typed field claims.
         Ok(replay(evidence, deadline, |bytes| {
             if (bytes.len() as u64) < claim.size {
                 return Err(format!(
@@ -111,8 +110,117 @@ impl<'e> Checker<'e> for MemoryLayoutChecker {
                     claim.size
                 ));
             }
+            for field in &claim.fields {
+                let Some(kind) = &field.is else { continue };
+                // The claim may not have been through admission, so nothing is assumed to fit.
+                let found = usize::try_from(field.offset)
+                    .ok()
+                    .zip(usize::try_from(field.len).ok())
+                    .and_then(|(at, len)| bytes.get(at..at.checked_add(len)?))
+                    .ok_or_else(|| format!("field `{}` lies outside the snapshot", field.name))?;
+                field_holds(kind, found).map_err(|why| {
+                    format!("field `{}` at +{:#x} {why}", field.name, field.offset)
+                })?;
+            }
             Ok(())
         }))
+    }
+}
+
+/// Little-endian unsigned value of up to 8 bytes.
+fn uint(bytes: &[u8]) -> u64 {
+    (bytes.iter().rev()).fold(0, |value, byte| value << 8 | u64::from(*byte))
+}
+
+/// Whether a field's bytes satisfy what the claim says they are. The error
+/// finishes the sentence "field `x` at +0x4 ...".
+fn field_holds(kind: &FieldKind, bytes: &[u8]) -> Result<(), String> {
+    let sized = |ok: bool| {
+        let sizes = "is not 1, 2, 4 or 8 bytes long";
+        ok.then_some(()).ok_or_else(|| sizes.to_owned())
+    };
+    let hex = hex::encode(bytes);
+    match kind {
+        FieldKind::Bytes(want) if hex.eq_ignore_ascii_case(want) => Ok(()),
+        FieldKind::Bytes(want) => Err(format!("is {hex}, not {want}")),
+        FieldKind::Uint { min, max } => {
+            sized(matches!(bytes.len(), 1 | 2 | 4 | 8))?;
+            let value = uint(bytes);
+            if (*min..=*max).contains(&value) {
+                Ok(())
+            } else {
+                Err(format!("is {value}, outside {min} to {max}"))
+            }
+        }
+        FieldKind::Int { min, max } => {
+            sized(matches!(bytes.len(), 1 | 2 | 4 | 8))?;
+            // Shift the field's top bit up to bit 63 and back down to extend its sign.
+            let shift = 64 - 8 * u32::try_from(bytes.len()).unwrap_or(8);
+            let value = i64::from_le_bytes((uint(bytes) << shift).to_le_bytes()) >> shift;
+            if (*min..=*max).contains(&value) {
+                Ok(())
+            } else {
+                Err(format!("is {value}, outside {min} to {max}"))
+            }
+        }
+        FieldKind::Float { min, max } => {
+            // Normal in its own width: a subnormal f32 would pass as a normal f64.
+            let (plain, value) = match bytes.len() {
+                4 => {
+                    let value = f32::from_bits(u32::try_from(uint(bytes)).unwrap_or(0));
+                    (value == 0.0 || value.is_normal(), f64::from(value))
+                }
+                8 => {
+                    let value = f64::from_bits(uint(bytes));
+                    (value == 0.0 || value.is_normal(), value)
+                }
+                _ => return Err("is not 4 or 8 bytes long".into()),
+            };
+            if plain && (f64::from(*min)..=f64::from(*max)).contains(&value) {
+                Ok(())
+            } else {
+                Err(format!("is {value:e}, not a plain float in {min} to {max}"))
+            }
+        }
+        FieldKind::OneOf(values) => {
+            sized(matches!(bytes.len(), 1 | 2 | 4 | 8))?;
+            let value = uint(bytes);
+            if values.contains(&value) {
+                Ok(())
+            } else {
+                Err(format!("is {value}, not one of the claimed values"))
+            }
+        }
+        FieldKind::Pointer { min, max } => {
+            sized(matches!(bytes.len(), 4 | 8))?;
+            let value = uint(bytes);
+            if value == 0 || (*min..=*max).contains(&value) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "is {value:#x}, neither null nor in {min:#x} to {max:#x}"
+                ))
+            }
+        }
+        FieldKind::Text => {
+            let text = bytes.split(|b| *b == 0).next().unwrap_or_default();
+            if text.is_empty() {
+                Err("is empty: its first byte is NUL".into())
+            } else if text.len() == bytes.len() {
+                Err("has no terminating NUL".into())
+            } else if text.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+                Ok(())
+            } else {
+                Err(format!(
+                    "is not printable text (starts {})",
+                    &hex[..hex.len().min(16)]
+                ))
+            }
+        }
+        FieldKind::Zero => match bytes.iter().position(|b| *b != 0) {
+            None => Ok(()),
+            Some(at) => Err(format!("is not zero (byte {at} is {:#04x})", bytes[at])),
+        },
     }
 }
 
@@ -380,18 +488,123 @@ mod tests {
         );
         assert_eq!(refuted(&seeded, kind, &responses)?, seeded.len());
 
-        // A layout claim says nothing a snapshot can contradict except its size, so a
-        // claim that is too large is the only seeded error this checker can catch.
-        let layout = |size| {
+        Ok(())
+    }
+
+    /// A made-up save header: magic, version 113, a size, a float time, a map name,
+    /// padding and a pointer.
+    fn save_header(size: u32, time: f32, map: [u8; 8]) -> Vec<u8> {
+        let mut bytes = b"JSAV".to_vec();
+        bytes.extend(113u32.to_le_bytes());
+        bytes.extend(size.to_le_bytes());
+        bytes.extend(time.to_le_bytes());
+        bytes.extend(map);
+        bytes.extend([0; 4]);
+        bytes.extend(0x0804_9000_u32.to_le_bytes());
+        bytes
+    }
+
+    /// Seeded errors for layouts: one field of the true claim moved or retyped at a time.
+    #[test]
+    fn seeded_wrong_layouts_are_refuted() -> Result<(), CheckError> {
+        let headers = [
+            save_header(8544, 12.5, *b"c1a0\0\0\0\0"),
+            save_header(512, 903.0, *b"c2a4e\0zz"),
+        ];
+        let field = |name: &str, offset, len, is| FieldLayout {
+            name: name.into(),
+            offset,
+            len,
+            is: Some(is),
+        };
+        let truth = vec![
+            field("magic", 0, 4, FieldKind::Bytes("4a534156".into())),
+            field("version", 4, 4, FieldKind::Uint { min: 113, max: 113 }),
+            field(
+                "size",
+                8,
+                4,
+                FieldKind::Int {
+                    min: 1,
+                    max: 1 << 20,
+                },
+            ),
+            field(
+                "time",
+                12,
+                4,
+                FieldKind::Float {
+                    min: 0,
+                    max: 100_000,
+                },
+            ),
+            field("map", 16, 8, FieldKind::Text),
+            field("pad", 24, 4, FieldKind::Zero),
+            field(
+                "next",
+                28,
+                4,
+                FieldKind::Pointer {
+                    min: 0x0804_8000,
+                    max: 0x0805_0000,
+                },
+            ),
+        ];
+        let layout = |fields: Vec<FieldLayout>| {
             ClaimKind::MemoryLayout(MemoryLayout {
-                type_name: "Player".into(),
-                size,
-                fields: vec![],
+                type_name: "SaveHeader".into(),
+                size: 32,
+                fields,
             })
         };
+        // Each wrong claim changes one field of the true one.
+        let wrong = |at: usize, offset, is| {
+            let mut fields = truth.clone();
+            fields[at].offset = offset;
+            fields[at].is = Some(is);
+            layout(fields)
+        };
+        let seeded = [
+            wrong(0, 0, FieldKind::Bytes("56415356".into())),
+            wrong(1, 4, FieldKind::Uint { min: 112, max: 112 }),
+            wrong(1, 8, FieldKind::Uint { min: 113, max: 113 }),
+            wrong(2, 8, FieldKind::Int { min: 1, max: 1000 }),
+            wrong(2, 8, FieldKind::OneOf([8544].into())),
+            wrong(
+                3,
+                8,
+                FieldKind::Float {
+                    min: 0,
+                    max: 100_000,
+                },
+            ),
+            wrong(4, 12, FieldKind::Text),
+            wrong(5, 20, FieldKind::Zero),
+            wrong(
+                6,
+                28,
+                FieldKind::Pointer {
+                    min: 0x4000_0000,
+                    max: 0x5000_0000,
+                },
+            ),
+            ClaimKind::MemoryLayout(MemoryLayout {
+                type_name: "SaveHeader".into(),
+                size: 33,
+                fields: truth.clone(),
+            }),
+        ];
         let kind = EvidenceKind::MemorySnapshot;
-        assert_eq!(refuted(&[layout(16)], kind, &[vec![0; 16]])?, 0);
-        assert_eq!(refuted(&[layout(17)], kind, &[vec![0; 16]])?, 1);
+        assert_eq!(refuted(&[layout(truth.clone())], kind, &headers)?, 0);
+        assert_eq!(refuted(&seeded, kind, &headers)?, seeded.len());
+        // A claim that only places fields asserts nothing a snapshot can contradict.
+        let mut placed = truth.clone();
+        for f in &mut placed {
+            f.is = None;
+        }
+        placed[1].offset = 5;
+        placed[1].len = 3;
+        assert_eq!(refuted(&[layout(placed)], kind, &headers)?, 0);
         Ok(())
     }
 
@@ -452,6 +665,7 @@ mod tests {
                 name: "hp".into(),
                 offset: 0,
                 len: 4,
+                is: None,
             }],
         };
         let v = MemoryLayoutChecker.check(

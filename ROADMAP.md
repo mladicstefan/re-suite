@@ -329,7 +329,7 @@ concrete failing case.
 
 - [ ] **Store.** Event log, evidence index, group commit, state rebuilt
       by replay
-- [ ] **Checkers.** Memory layout over snapshots, signature replay over
+- [x] **Checkers.** Memory layout over snapshots, signature replay over
       captured requests, response shape over captured exchanges
 - [x] **Agent tools.** The five verbs, with rejections worded for an
       agent
@@ -349,6 +349,9 @@ the ledger changes no status, and the write and read budgets hold.
       claims
 - [ ] **Version reruns.** Rerun the whole ledger on a new build, with
       anchors that survive rebuilds and a status diff
+- [ ] **Live captures.** Snapshots of a running process, taken only with
+      human approval, that carry what the human observed at capture time
+      (the HUD showed 73 HP); a layout claim must decode to those values
 - [ ] **Formats.** File and protocol claims through Kaitai Struct
 - [ ] **First binary claims.** Facts exported from Rizin; structural
       claims checked "within the recovered code", assumptions listed
@@ -479,7 +482,6 @@ honestly.
 | How much of x86-64 and AArch64 does RzIL lift, and how often does it disagree with a second lifter? | End of Phase 2 |
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
 | One flush on the current disk (btrfs on dm-crypt) takes 6.2 ms, so durable `propose` has a 7.2 ms median against the 2 ms budget, and 961 events/s against 1,000. Move the ledger to a filesystem with faster flushes, relax the budget for this machine, or allow `synchronous=NORMAL` for interactive writes? | Before the Phase 1 Store box is ticked |
-| A memory-layout claim states only a size and field offsets, so a snapshot can refute nothing but the size: wrong offsets pass. What should a layout claim assert about field contents (typed fields: integer ranges, pointers, strings) so the checker can catch them? | Before the Phase 1 Checkers box is ticked |
 | A request-signature claim carries its key (`key_hex`), so the key is in the event log and in the claim's hash, while section 7 says secrets are stored as evidence. Move the key to evidence and have the claim cite it? | Before the trial run |
 | How far does VerifiedIDA's standard overlap, and should we build on it or interoperate? | Before the open format in Phase 6 |
 

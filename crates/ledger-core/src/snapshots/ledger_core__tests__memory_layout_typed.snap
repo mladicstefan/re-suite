@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: header.sentence()
+---
+`SaveHeader` is 16 bytes: f at +0x4 (bytes 4a534156), version at +0x8 (113), rest at +0xc. Contents checked for 2 of 3 fields.

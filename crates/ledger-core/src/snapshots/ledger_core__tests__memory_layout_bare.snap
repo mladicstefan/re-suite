@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: bare.sentence()
+---
+`Blob` is 16 bytes.

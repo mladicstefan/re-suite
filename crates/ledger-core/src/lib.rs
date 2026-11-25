@@ -65,11 +65,109 @@ macro_rules! hash_id {
 hash_id!(ClaimId, b"ledger.claim.v1\0");
 hash_id!(EvidenceId, b"ledger.evidence.v1\0");
 
+/// What a field's bytes must look like in every snapshot. Integers, floats and
+/// pointers are little-endian.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldKind {
+    /// Exactly these bytes, as hex: a magic number or a fixed tag.
+    Bytes(String),
+    /// Unsigned integer of 1, 2, 4 or 8 bytes within `min..=max`.
+    Uint { min: u64, max: u64 },
+    /// Signed integer of 1, 2, 4 or 8 bytes within `min..=max`.
+    Int { min: i64, max: i64 },
+    /// Float of 4 or 8 bytes within `min..=max` that is zero or normal: a subnormal
+    /// value is what a small integer looks like when read as a float.
+    Float { min: i32, max: i32 },
+    /// Unsigned integer of 1, 2, 4 or 8 bytes equal to one of these values.
+    OneOf(BTreeSet<u64>),
+    /// Null, or an address of 4 or 8 bytes within `min..=max`.
+    Pointer { min: u64, max: u64 },
+    /// At least one printable ASCII character, then a NUL inside the field.
+    Text,
+    /// Every byte zero: padding or a reserved field.
+    Zero,
+}
+
+impl FieldKind {
+    /// Whether the constraint suits a field of `len` bytes and rules anything out.
+    fn fits(&self, len: u64) -> Result<(), &'static str> {
+        let integer = matches!(len, 1 | 2 | 4 | 8);
+        let top = match len {
+            1 => 0xff,
+            2 => 0xffff,
+            4 => 0xffff_ffff,
+            _ => u64::MAX,
+        };
+        let (low, high) = match len {
+            1 => (i64::from(i8::MIN), i64::from(i8::MAX)),
+            2 => (i64::from(i16::MIN), i64::from(i16::MAX)),
+            4 => (i64::from(i32::MIN), i64::from(i32::MAX)),
+            _ => (i64::MIN, i64::MAX),
+        };
+        let vacuous = "its range allows every value; drop `is` instead";
+        let empty = "its range is empty or does not fit the field";
+        match self {
+            Self::Bytes(hex) => match hex::decode(hex) {
+                Ok(bytes) if bytes.len() as u64 == len => Ok(()),
+                _ => Err("`bytes` must be hex of exactly the field's length"),
+            },
+            Self::Uint { min, max } | Self::Pointer { min, max } => match () {
+                () if !integer => Err("integers and pointers are 1, 2, 4 or 8 bytes"),
+                () if min > max || *max > top => Err(empty),
+                () if *min == 0 && *max == top => Err(vacuous),
+                () => Ok(()),
+            },
+            Self::Int { min, max } => match () {
+                () if !integer => Err("integers and pointers are 1, 2, 4 or 8 bytes"),
+                () if min > max || *min < low || *max > high => Err(empty),
+                () if *min == low && *max == high => Err(vacuous),
+                () => Ok(()),
+            },
+            Self::Float { min, max } => match () {
+                () if !matches!(len, 4 | 8) => Err("floats are 4 or 8 bytes"),
+                () if min > max => Err(empty),
+                () => Ok(()),
+            },
+            Self::OneOf(values) => match () {
+                () if !integer => Err("integers and pointers are 1, 2, 4 or 8 bytes"),
+                () if values.is_empty() || values.iter().any(|v| *v > top) => Err(empty),
+                () => Ok(()),
+            },
+            Self::Text | Self::Zero => Ok(()),
+        }
+    }
+}
+
+impl fmt::Display for FieldKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bytes(hex) => write!(f, "bytes {hex}"),
+            Self::Uint { min, max } if min == max => write!(f, "{min}"),
+            Self::Uint { min, max } => write!(f, "{min} to {max}"),
+            Self::Int { min, max } if min == max => write!(f, "{min}"),
+            Self::Int { min, max } => write!(f, "{min} to {max}"),
+            Self::Float { min, max } => write!(f, "float {min} to {max}"),
+            Self::OneOf(values) => {
+                let values: Vec<String> = values.iter().map(u64::to_string).collect();
+                write!(f, "one of {}", values.join(", "))
+            }
+            Self::Pointer { min, max } => write!(f, "null or address {min:#x} to {max:#x}"),
+            Self::Text => f.write_str("text"),
+            Self::Zero => f.write_str("zero"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 pub struct FieldLayout {
     pub name: String,
     pub offset: u64,
     pub len: u64,
+    /// What the bytes must look like in every snapshot. Without it the claim
+    /// only places the field, and no snapshot can contradict that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is: Option<FieldKind>,
 }
 
 /// A struct's in-memory layout.
@@ -153,17 +251,23 @@ impl Claim {
     #[must_use]
     pub fn sentence(&self) -> String {
         match &self.kind {
-            ClaimKind::MemoryLayout(m) => format!(
-                "`{}` is {} bytes with {} fields ({}).",
-                m.type_name,
-                m.size,
-                m.fields.len(),
-                m.fields
-                    .iter()
-                    .map(|f| format!("{} at +{:#x}", f.name, f.offset))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            ClaimKind::MemoryLayout(m) if m.fields.is_empty() => {
+                format!("`{}` is {} bytes.", m.type_name, m.size)
+            }
+            ClaimKind::MemoryLayout(m) => {
+                let field = |f: &FieldLayout| match &f.is {
+                    Some(kind) => format!("{} at +{:#x} ({kind})", f.name, f.offset),
+                    None => format!("{} at +{:#x}", f.name, f.offset),
+                };
+                format!(
+                    "`{}` is {} bytes: {}. Contents checked for {} of {} fields.",
+                    m.type_name,
+                    m.size,
+                    m.fields.iter().map(field).collect::<Vec<_>>().join(", "),
+                    m.fields.iter().filter(|f| f.is.is_some()).count(),
+                    m.fields.len()
+                )
+            }
             ClaimKind::RequestSignature(s) => format!(
                 "Requests to {} carry a {:?} signature of the body in header `{}`, {:?} encoded.",
                 s.endpoint, s.algorithm, s.header, s.encoding
@@ -216,6 +320,9 @@ pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
                         "field `{}` is empty, overlaps, or exceeds size",
                         f.name
                     ));
+                }
+                if let Some(Err(why)) = f.is.as_ref().map(|kind| kind.fits(f.len)) {
+                    return bad(&format!("field `{}`: {why}", f.name));
                 }
                 end = f.offset + f.len;
             }
@@ -520,11 +627,13 @@ mod tests {
                         name: "hp".into(),
                         offset: 0,
                         len: 4,
+                        is: None,
                     },
                     FieldLayout {
                         name: "pos".into(),
                         offset: 8,
                         len: 12,
+                        is: None,
                     },
                 ],
             }),
@@ -563,10 +672,97 @@ mod tests {
                 name: "bad".into(),
                 offset: 2,
                 len: 4,
+                is: None,
             });
         }
         assert!(admit(c).is_err());
         assert!(admit(layout(16)).is_err(), "pos exceeds size");
+    }
+
+    /// A layout with one typed field of `len` bytes.
+    fn typed(len: u64, kind: FieldKind) -> Claim {
+        Claim {
+            kind: ClaimKind::MemoryLayout(MemoryLayout {
+                type_name: "SaveHeader".into(),
+                size: 16,
+                fields: vec![FieldLayout {
+                    name: "f".into(),
+                    offset: 4,
+                    len,
+                    is: Some(kind),
+                }],
+            }),
+            premises: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn admit_checks_field_kinds() -> Result<(), CoreError> {
+        let good = [
+            typed(4, FieldKind::Bytes("4a534156".into())),
+            typed(4, FieldKind::Uint { min: 113, max: 113 }),
+            typed(2, FieldKind::Int { min: -5, max: 5 }),
+            typed(4, FieldKind::Float { min: 0, max: 100 }),
+            typed(1, FieldKind::OneOf([0, 1].into())),
+            typed(
+                8,
+                FieldKind::Pointer {
+                    min: 0x1000,
+                    max: 0x7fff_ffff_ffff,
+                },
+            ),
+            typed(12, FieldKind::Text),
+            typed(3, FieldKind::Zero),
+        ];
+        for claim in good {
+            admit(claim)?;
+        }
+        let bad = [
+            typed(4, FieldKind::Bytes("4a53".into())),
+            typed(4, FieldKind::Bytes("not hex!".into())),
+            typed(3, FieldKind::Uint { min: 1, max: 2 }),
+            typed(1, FieldKind::Uint { min: 0, max: 256 }),
+            typed(2, FieldKind::Uint { min: 9, max: 3 }),
+            typed(
+                2,
+                FieldKind::Uint {
+                    min: 0,
+                    max: 0xffff,
+                },
+            ),
+            typed(
+                1,
+                FieldKind::Int {
+                    min: -128,
+                    max: 127,
+                },
+            ),
+            typed(1, FieldKind::Int { min: -129, max: 0 }),
+            typed(2, FieldKind::Float { min: 0, max: 1 }),
+            typed(1, FieldKind::OneOf(BTreeSet::new())),
+            typed(1, FieldKind::OneOf([300].into())),
+            typed(
+                8,
+                FieldKind::Pointer {
+                    min: 0,
+                    max: u64::MAX,
+                },
+            ),
+        ];
+        for claim in bad {
+            assert!(admit(claim.clone()).is_err(), "{claim:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn untyped_claims_keep_their_identity() -> Result<(), CoreError> {
+        // Old events must replay to the same ids: an absent `is` is not serialized.
+        let json = serde_json::to_string(&layout(32))?;
+        assert!(!json.contains("\"is\""), "{json}");
+        let old = r#"{"kind":"memory_layout","type_name":"Player","size":32,"fields":[{"name":"hp","offset":0,"len":4},{"name":"pos","offset":8,"len":12}],"premises":[]}"#;
+        assert_eq!(json, old);
+        Ok(())
     }
 
     #[test]
@@ -616,6 +812,32 @@ mod tests {
     #[test]
     fn sentences() {
         insta::assert_snapshot!("memory_layout", layout(32).sentence());
+        let mut header = typed(4, FieldKind::Bytes("4a534156".into()));
+        if let ClaimKind::MemoryLayout(m) = &mut header.kind {
+            m.fields.push(FieldLayout {
+                name: "version".into(),
+                offset: 8,
+                len: 4,
+                is: Some(FieldKind::Uint { min: 113, max: 113 }),
+            });
+            m.fields.push(FieldLayout {
+                name: "rest".into(),
+                offset: 12,
+                len: 4,
+                is: None,
+            });
+        }
+        insta::assert_snapshot!("memory_layout_typed", header.sentence());
+        let bare = MemoryLayout {
+            type_name: "Blob".into(),
+            size: 16,
+            fields: vec![],
+        };
+        let bare = Claim {
+            kind: ClaimKind::MemoryLayout(bare),
+            premises: BTreeSet::new(),
+        };
+        insta::assert_snapshot!("memory_layout_bare", bare.sentence());
         insta::assert_snapshot!("request_signature", signature().sentence());
         insta::assert_snapshot!("response_schema", schema().sentence());
     }

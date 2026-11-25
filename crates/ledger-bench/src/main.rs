@@ -30,6 +30,7 @@ fn claim(n: u64, premises: &[ClaimId]) -> Claim {
         name: name.into(),
         offset,
         len: 4,
+        is: None,
     };
     Claim {
         kind: ClaimKind::MemoryLayout(MemoryLayout {
