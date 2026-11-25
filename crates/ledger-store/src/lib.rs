@@ -10,12 +10,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::thread::JoinHandle;
 
-use ledger_core::{CoreError, Event, EvidenceId, EvidenceKind, Ledger};
+use ledger_core::{CoreError, Event, EvidenceId, EvidenceKind, HttpExchange, Ledger};
 use rusqlite::{Connection, OpenFlags, params};
 
 /// Bumped by every schema change; each bump needs a forward migration and a
 /// ledger file of the old version under `tests/fixtures`.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Jobs waiting for the writer. A full queue blocks the producer.
 const QUEUE: usize = 1024;
@@ -53,14 +53,26 @@ CREATE TABLE evidence (
     hash      TEXT PRIMARY KEY,
     path      TEXT NOT NULL,
     size      INTEGER NOT NULL,
-    added_seq INTEGER NOT NULL
+    added_seq INTEGER NOT NULL,
+    method    TEXT,
+    url       TEXT,
+    status    INTEGER
 ) WITHOUT ROWID;
 CREATE TRIGGER events_no_update BEFORE UPDATE ON events
     BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
 CREATE TRIGGER events_no_delete BEFORE DELETE ON events
     BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 ";
+
+/// Forward-only migrations: entry `n` takes a file from schema version `n + 1` to `n + 2`.
+/// Version 2 indexes HTTP evidence by its request line; rows from version 1 stay unindexed.
+const MIGRATIONS: [&str; 1] = ["
+ALTER TABLE evidence ADD COLUMN method TEXT;
+ALTER TABLE evidence ADD COLUMN url TEXT;
+ALTER TABLE evidence ADD COLUMN status INTEGER;
+PRAGMA user_version = 2;
+"];
 
 /// The ledger as of event `seq`. Never changes once published.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -82,13 +94,23 @@ impl Deref for Evidence {
 
 type Job = (Work, flume::Sender<Result<i64, StoreError>>);
 
+/// What a stored HTTP exchange is a capture of: the index key for finding evidence by endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestLine {
+    pub method: String,
+    pub url: String,
+    /// `None` if the request was never answered.
+    pub status: Option<u16>,
+}
+
 enum Work {
     Events(Vec<Event>),
-    /// Hash, kind and size of a file already in the evidence directory.
-    Evidence(EvidenceId, EvidenceKind, i64),
+    /// Hash, kind, size and request line of a file already in the evidence directory.
+    Evidence(EvidenceId, EvidenceKind, i64, Option<RequestLine>),
 }
 
 pub struct Store {
+    path: PathBuf,
     evidence_dir: PathBuf,
     published: Arc<RwLock<Arc<Snapshot>>>,
     tx: Option<flume::Sender<Job>>,
@@ -124,6 +146,14 @@ impl Store {
         if conn.query_one(objects, [], |r| r.get::<_, i64>(0))? == 0 {
             conn.execute_batch(SCHEMA)?;
         }
+        // Each migration is one transaction, so a crash leaves a whole version either way.
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let done = usize::try_from(version)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(1);
+        for migration in MIGRATIONS.iter().skip(done).filter(|_| version >= 1) {
+            conn.execute_batch(&format!("BEGIN;{migration}COMMIT;"))?;
+        }
         let live = Arc::new(load(&conn)?);
         let evidence_dir = sidecar(path, ".evidence");
         fs::create_dir_all(&evidence_dir)?;
@@ -140,6 +170,7 @@ impl Store {
             .name("ledger-writer".into())
             .spawn(move || writer.run(&rx))?;
         Ok(Self {
+            path: path.to_path_buf(),
             evidence_dir,
             published,
             tx: Some(tx),
@@ -209,8 +240,45 @@ impl Store {
             fs::rename(&tmp, &file)?;
         }
         let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-        self.call(Work::Evidence(id.clone(), kind, size))?;
+        // An exchange that does not parse is still stored; its checker will say what is wrong.
+        let line = (kind == EvidenceKind::HttpExchange)
+            .then(|| serde_json::from_slice::<HttpExchange>(bytes).ok())
+            .flatten()
+            .map(|exchange| RequestLine {
+                method: exchange.request.method,
+                url: exchange.request.url,
+                status: exchange.response.map(|r| r.status),
+            });
+        self.call(Work::Evidence(id.clone(), kind, size, line))?;
         Ok(id)
+    }
+
+    /// Up to `limit` indexed HTTP captures whose id sorts after `after`, in id order,
+    /// read on a connection of its own. Callers page by passing the last id back.
+    ///
+    /// # Errors
+    /// The read connection or the query fails.
+    pub fn http_evidence(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, RequestLine)>, StoreError> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(&self.path, flags)?;
+        let mut stmt = conn.prepare(
+            "SELECT hash, method, url, status FROM evidence
+             WHERE method IS NOT NULL AND hash > ?1 ORDER BY hash LIMIT ?2",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt.query_map(params![after.unwrap_or(""), limit], |r| {
+            let line = RequestLine {
+                method: r.get(1)?,
+                url: r.get(2)?,
+                status: r.get(3)?,
+            };
+            Ok((r.get(0)?, line))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// [`Store::add_evidence`] for a saved capture on disk, mapped rather than read into memory.
@@ -283,7 +351,8 @@ pub fn replay(path: impl AsRef<Path>) -> Result<Snapshot, StoreError> {
 /// `Event::decode` re-admits every stored claim.
 fn load(conn: &Connection) -> Result<Snapshot, StoreError> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version != SCHEMA_VERSION {
+    // Every version so far has the same events table, so an older file replays as it is.
+    if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(StoreError::Schema(version));
     }
     let mut snapshot = Snapshot::default();
@@ -385,7 +454,7 @@ fn stage(
 ) -> Result<Result<(), StoreError>, StoreError> {
     let (events, evidence) = match work {
         Work::Events(events) => (events, None),
-        Work::Evidence(id, kind, size) => {
+        Work::Evidence(id, kind, size, about) => {
             let indexed = "SELECT 1 FROM evidence WHERE hash = ?1";
             if tx.prepare_cached(indexed)?.exists([id.as_str()])? {
                 return Ok(Ok(()));
@@ -394,7 +463,7 @@ fn stage(
                 id: id.clone(),
                 kind,
             };
-            (vec![event], Some((id, size)))
+            (vec![event], Some((id, size, about)))
         }
     };
     let (start, seq) = (accepted.len(), next.seq);
@@ -424,10 +493,22 @@ fn stage(
         insert.execute(params![event.encode()?, at])?;
         next.seq = tx.last_insert_rowid();
     }
-    if let Some((id, size)) = evidence {
+    if let Some((id, size, about)) = evidence {
         // `path` is relative to the evidence directory, so the ledger can be moved.
-        let index = "INSERT INTO evidence (hash, path, size, added_seq) VALUES (?1, ?1, ?2, ?3)";
-        (tx.prepare_cached(index)?).execute(params![id.as_str(), size, next.seq])?;
+        let index = "INSERT INTO evidence (hash, path, size, added_seq, method, url, status)
+                     VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6)";
+        let (method, url, status) = match about {
+            Some(request) => (Some(request.method), Some(request.url), request.status),
+            None => (None, None, None),
+        };
+        (tx.prepare_cached(index)?).execute(params![
+            id.as_str(),
+            size,
+            next.seq,
+            method,
+            url,
+            status
+        ])?;
     }
     Ok(Ok(()))
 }
@@ -571,9 +652,51 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let db = dir.path().join("l.db");
         fs::copy(fixture, &db)?;
+        // A file of an older version replays read-only as it is, and is migrated on open.
+        assert_eq!(statuses(&replay(&db)?.ledger), one_of_each()?);
+        let store = Store::open(&db)?;
+        assert_eq!(statuses(&store.snapshot().ledger), one_of_each()?);
+        let version: i64 =
+            Connection::open(&db)?.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        assert_eq!(version, SCHEMA_VERSION);
+        // The migrated index takes new captures and still lists none of the old rows.
+        let exchange = br#"{"request": {"method": "GET", "url": "https://a.example/x?k=1"}, "response": {"status": 200}}"#;
+        let id = store.add_evidence(EvidenceKind::HttpExchange, exchange)?;
+        let listed = store.http_evidence(None, 10)?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].0, id.as_str());
+        assert_eq!(listed[0].1.status, Some(200));
+        Ok(())
+    }
+
+    #[test]
+    fn http_evidence_is_listed_in_pages_by_id() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        store.add_evidence(EvidenceKind::MemorySnapshot, b"not http")?;
+        store.add_evidence(EvidenceKind::HttpExchange, b"not json either")?;
+        for n in 0..5 {
+            let exchange = format!(r#"{{"request": {{"method": "POST", "url": "/item/{n}"}}}}"#);
+            store.add_evidence(EvidenceKind::HttpExchange, exchange.as_bytes())?;
+        }
+        let first = store.http_evidence(None, 3)?;
+        let rest = store.http_evidence(first.last().map(|(id, _)| id.as_str()), 3)?;
+        assert_eq!((first.len(), rest.len()), (3, 2));
+        let mut urls: Vec<_> = first
+            .iter()
+            .chain(&rest)
+            .map(|(_, l)| l.url.clone())
+            .collect();
+        urls.sort();
         assert_eq!(
-            statuses(&Store::open(&db)?.snapshot().ledger),
-            one_of_each()?
+            urls,
+            ["/item/0", "/item/1", "/item/2", "/item/3", "/item/4"]
+        );
+        assert!(
+            first
+                .iter()
+                .chain(&rest)
+                .all(|(_, l)| l.method == "POST" && l.status.is_none())
         );
         Ok(())
     }

@@ -84,10 +84,11 @@ another status, another host, page-load noise, another method.
   for it. Captures that do not meet the conditions are refused.
 - **Open: a signature claim has no status.** A capture of a request the
   server rejected would refute a true claim about accepted requests.
-- **Open: the agent has to know which captures belong to an endpoint.**
-  The ledger refuses the wrong ones but cannot list the right ones, and
-  evidence is still added one file per call. Importing a HAR file and
-  asking for "the evidence about this endpoint" would remove both.
+- **Fixed afterwards: the agent had to know which captures belong to an
+  endpoint.** `add_evidence` now takes a HAR file and stores one piece
+  of evidence per entry, and `ask about=evidence` lists the captures of
+  an endpoint. The 804 exchanges of this trial, written as one 16 MB HAR
+  file, import in a single call.
 - **No real request signatures were found.** Public pages without a
   login do not sign requests, so the signature kind was only exercised
   on the simulation. The Algolia search sends an API key in a header,

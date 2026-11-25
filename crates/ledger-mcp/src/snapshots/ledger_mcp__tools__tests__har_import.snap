@@ -1,0 +1,35 @@
+---
+source: crates/ledger-mcp/src/tools.rs
+expression: log
+---
+add_evidence session.har
+seq 5
+imported 5 exchanges from the HAR file, 5 of them new
+list the ones for an endpoint with ask about=evidence subject=`METHOD host/path`
+
+add it again
+seq 5
+imported 5 exchanges from the HAR file, 0 of them new
+list the ones for an endpoint with ask about=evidence subject=`METHOD host/path`
+
+ask about=evidence, the crate endpoint
+seq 5
+evidence ab5c9367463d  200  GET https://crates.io/api/v1/crates/tokio
+evidence cad7a3cadad6  404  GET https://crates.io/api/v1/crates/nope
+evidence fb731a8cb158  200  GET https://crates.io/api/v1/crates/serde
+end
+
+ask about=evidence, only requests with include
+seq 5
+evidence fb731a8cb158  200  GET https://crates.io/api/v1/crates/serde
+end
+
+ask about=evidence, an endpoint nothing was captured for
+seq 5
+nothing
+
+ask about=evidence, not an endpoint
+REJECTED endpoint_malformed [crates]: an endpoint is written `METHOD [host]/path`, like `GET api.example.com/users/{id}`. Next: Write the subject as an endpoint and ask again.
+
+ask about=evidence, no subject
+REJECTED argument_missing [subject]: about=evidence needs `subject`. Next: Call ask again with that argument.

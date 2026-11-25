@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use ledger_checkers::{CheckError, check_claim};
 use ledger_core::{
-    Claim, ClaimId, CoreError, Event, EvidenceId, EvidenceKind, Ledger, Status, Verdict, admit,
+    Body, Claim, ClaimId, CoreError, Endpoint, Event, EvidenceId, EvidenceKind, Header,
+    HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict, admit,
 };
 use ledger_store::{Snapshot, Store, StoreError};
 use schemars::JsonSchema;
@@ -302,6 +303,9 @@ pub enum About {
     OnHold,
     /// What would be put on hold if a claim failed: needs `claim`.
     Affected,
+    /// Which captures belong to an endpoint: needs `subject`, written as an
+    /// endpoint such as `GET api.example.com/users/{id}`.
+    Evidence,
 }
 
 /// Whether a claim belongs in the list being asked for.
@@ -329,6 +333,10 @@ pub fn ask(
 ) -> Result<String, Rejection> {
     let snapshot = store.snapshot();
     let ledger = &snapshot.ledger;
+    if let About::Evidence = about {
+        let endpoint = subject.ok_or_else(|| needs("evidence", "subject"))?;
+        return captures_of(store, &snapshot, endpoint, after);
+    }
     let wanted: Filter<'_> = match about {
         About::All => Box::new(|_, _, _| true),
         About::Claim => {
@@ -339,6 +347,7 @@ pub fn ask(
             let subject = subject.ok_or_else(|| needs("subject", "subject"))?;
             Box::new(move |_, claim, _| claim.subject() == subject)
         }
+        About::Evidence => return Err(needs("evidence", "subject")),
         About::OnHold => Box::new(|_, _, status| status == Status::Blocked),
         About::Affected => {
             let id = find_claim(ledger, claim.ok_or_else(|| needs("affected", "claim"))?)?;
@@ -376,6 +385,148 @@ pub fn ask(
         _ => out.push_str("end"),
     }
     Ok(stamp(&snapshot, &out))
+}
+
+/// One page of the indexed captures whose request line belongs to `endpoint`.
+fn captures_of(
+    store: &Store,
+    snapshot: &Snapshot,
+    endpoint: &str,
+    after: Option<&str>,
+) -> Result<String, Rejection> {
+    let parsed = Endpoint::parse(endpoint).map_err(|why| {
+        reject(
+            "endpoint_malformed",
+            endpoint,
+            format!("{why}."),
+            "Write the subject as an endpoint and ask again.",
+        )
+    })?;
+    let ledger = &snapshot.ledger;
+    let mut cursor = (after
+        .map(|text| only(ledger.evidence_starting(text), text, unknown_evidence)))
+    .transpose()?
+    .map(ToString::to_string);
+    let mut out = String::new();
+    let mut shown = 0;
+    // The index is read in id order, a chunk at a time, until one page of matches is found.
+    let more = 'scan: loop {
+        let chunk = store.http_evidence(cursor.as_deref(), 500)?;
+        for (id, line) in &chunk {
+            if !parsed.matches(&line.method, &line.url) {
+                continue;
+            }
+            if shown == PAGE {
+                break 'scan true;
+            }
+            // The query string can hold keys, so only the path is shown.
+            let url = line.url.split(['?', '#']).next().unwrap_or_default();
+            let status = line
+                .status
+                .map_or_else(|| "no response".into(), |s| s.to_string());
+            let _ = writeln!(
+                out,
+                "evidence {}  {status}  {} {url}",
+                short(id),
+                line.method
+            );
+            shown += 1;
+            cursor = Some(id.clone());
+        }
+        match chunk.last() {
+            Some((id, _)) if chunk.len() == 500 => cursor = Some(id.clone()),
+            _ => break false,
+        }
+    };
+    match (shown, more, cursor) {
+        (0, _, _) => out.push_str("nothing"),
+        (_, true, Some(last)) => {
+            let _ = write!(out, "more: ask again with after={}", short(&last));
+        }
+        _ => out.push_str("end"),
+    }
+    Ok(stamp(snapshot, &out))
+}
+
+/// The parts of a HAR file this server reads. Everything else in the file is ignored.
+#[derive(rmcp::serde::Deserialize)]
+#[serde(crate = "rmcp::serde")]
+struct Har {
+    log: HarLog,
+}
+
+#[derive(rmcp::serde::Deserialize)]
+#[serde(crate = "rmcp::serde")]
+struct HarLog {
+    entries: Vec<HarEntry>,
+}
+
+#[derive(rmcp::serde::Deserialize)]
+#[serde(crate = "rmcp::serde")]
+struct HarEntry {
+    request: HarRequest,
+    response: Option<HarResponse>,
+}
+
+#[derive(rmcp::serde::Deserialize)]
+#[serde(crate = "rmcp::serde", rename_all = "camelCase")]
+struct HarRequest {
+    method: String,
+    url: String,
+    #[serde(default)]
+    headers: Vec<Header>,
+    post_data: Option<HarContent>,
+}
+
+#[derive(rmcp::serde::Deserialize)]
+#[serde(crate = "rmcp::serde")]
+struct HarResponse {
+    status: u16,
+    #[serde(default)]
+    headers: Vec<Header>,
+    content: Option<HarContent>,
+}
+
+#[derive(rmcp::serde::Deserialize)]
+#[serde(crate = "rmcp::serde")]
+struct HarContent {
+    text: Option<String>,
+    encoding: Option<String>,
+}
+
+impl HarContent {
+    fn body(self) -> Option<Body> {
+        let base64 = self.encoding.as_deref() == Some("base64");
+        self.text.map(|text| {
+            if base64 {
+                Body::Base64(text)
+            } else {
+                Body::Text(text)
+            }
+        })
+    }
+}
+
+impl From<HarEntry> for HttpExchange {
+    fn from(entry: HarEntry) -> Self {
+        Self {
+            request: HttpRequest {
+                method: entry.request.method,
+                url: entry.request.url,
+                headers: entry.request.headers,
+                body: entry.request.post_data.and_then(HarContent::body),
+            },
+            // HAR writes status 0 for a request that was never answered.
+            response: entry
+                .response
+                .filter(|r| r.status != 0)
+                .map(|r| HttpResponse {
+                    status: r.status,
+                    headers: r.headers,
+                    body: r.content.and_then(HarContent::body),
+                }),
+        }
+    }
 }
 
 /// Why a claim has its status: its premises, its recent verdicts and any counterexample.
@@ -425,14 +576,36 @@ pub fn explain(store: &Store, claim: &str) -> Result<String, Rejection> {
     Ok(stamp(&snapshot, &out))
 }
 
-/// Stores a local capture file as evidence and returns its id.
+/// Stores a local capture file as evidence and returns its id. A HAR file given
+/// as `http_exchange` is split into one piece of evidence per entry.
 ///
 /// # Errors
 /// The file cannot be read or stored.
 pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<String, Rejection> {
-    let id = store.add_evidence_file(kind, path)?;
-    let body = format!("evidence {}", short(id.as_str()));
-    Ok(stamp(&store.snapshot(), &body))
+    let har = (kind == EvidenceKind::HttpExchange)
+        .then(|| std::fs::read(path).ok())
+        .flatten()
+        .and_then(|bytes| rmcp::serde_json::from_slice::<Har>(&bytes).ok());
+    let Some(har) = har else {
+        let id = store.add_evidence_file(kind, path)?;
+        let body = format!("evidence {}", short(id.as_str()));
+        return Ok(stamp(&store.snapshot(), &body));
+    };
+    let before = store.snapshot();
+    let total = har.log.entries.len();
+    for entry in har.log.entries {
+        let exchange = rmcp::serde_json::to_vec(&HttpExchange::from(entry))
+            .map_err(|e| StoreError::Core(e.into()))?;
+        store.add_evidence(kind, &exchange)?;
+    }
+    // Each new piece of evidence is one event; repeats inside the file and re-imports add none.
+    let after = store.snapshot();
+    let new = after.seq - before.seq;
+    let body = format!(
+        "imported {total} exchanges from the HAR file, {new} of them new\n\
+         list the ones for an endpoint with ask about=evidence subject=`METHOD host/path`"
+    );
+    Ok(stamp(&after, &body))
 }
 
 /// Withdraws a claim. Its history stays; its dependents go on hold.
@@ -628,6 +801,78 @@ mod tests {
             )),
         ];
         insta::assert_snapshot!("rejections", all.join("\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_har_file_is_imported_and_listed_by_endpoint() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let entry = |method: &str, url: &str, status: u16| {
+            rmcp::serde_json::json!({
+                "startedDateTime": "2026-11-26T10:00:00Z",
+                "request": {"method": method, "url": url, "headers": [{"name": "accept", "value": "*/*"}]},
+                "response": {"status": status, "headers": [], "content": {"mimeType": "application/json", "text": "{\"id\": 1}"}},
+            })
+        };
+        let har = rmcp::serde_json::json!({"log": {"version": "1.2", "entries": [
+            entry("GET", "https://crates.io/api/v1/crates/serde?include=x&token=s3cret", 200),
+            entry("GET", "https://crates.io/api/v1/crates/tokio", 200),
+            entry("GET", "https://crates.io/api/v1/crates/nope", 404),
+            entry("GET", "https://crates.io/assets/app.js", 200),
+            entry("POST", "https://crates.io/api/v1/crates/serde", 0),
+        ]}});
+        let file = dir.path().join("session.har");
+        std::fs::write(&file, har.to_string())?;
+        let path = file.to_str().ok_or("path")?;
+        let mut log = String::new();
+        let mut say = |what: &str, result: Result<String, Rejection>| {
+            let text = result.unwrap_or_else(|r| format!("REJECTED {r}"));
+            let _ = write!(log, "{what}\n{text}\n\n");
+        };
+        say(
+            "add_evidence session.har",
+            add_evidence(&store, EvidenceKind::HttpExchange, path),
+        );
+        say(
+            "add it again",
+            add_evidence(&store, EvidenceKind::HttpExchange, path),
+        );
+        let crates = "GET crates.io/api/v1/crates/{name}";
+        say(
+            "ask about=evidence, the crate endpoint",
+            ask(&store, About::Evidence, None, Some(crates), None),
+        );
+        say(
+            "ask about=evidence, only requests with include",
+            ask(
+                &store,
+                About::Evidence,
+                None,
+                Some("GET crates.io/api/v1/crates/{name}?include"),
+                None,
+            ),
+        );
+        say(
+            "ask about=evidence, an endpoint nothing was captured for",
+            ask(
+                &store,
+                About::Evidence,
+                None,
+                Some("GET docs.rs/crate/{name}"),
+                None,
+            ),
+        );
+        say(
+            "ask about=evidence, not an endpoint",
+            ask(&store, About::Evidence, None, Some("crates"), None),
+        );
+        say(
+            "ask about=evidence, no subject",
+            ask(&store, About::Evidence, None, None, None),
+        );
+        insta::assert_snapshot!("har_import", log);
+        assert!(!log.contains("s3cret"), "a query string was echoed");
         Ok(())
     }
 

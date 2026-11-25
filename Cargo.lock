@@ -1025,6 +1025,7 @@ dependencies = [
  "memmap2",
  "proptest",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tracing",
