@@ -34,6 +34,9 @@ for (const url of urls) {
   };
   listeners.push(on);
   await send("Network.enable", { maxPostDataSize: 1 << 20 }, sessionId);
+  // A response the browser takes from its cache is not what the server sent now: Chromium
+  // drops strict-transport-security from cached headers, for one. Every request goes out.
+  await send("Network.setCacheDisabled", { cacheDisabled: true }, sessionId);
   await send("Page.navigate", { url }, sessionId);
   await new Promise((r) => setTimeout(r, 9000));
   for (const [requestId, e] of seen) {

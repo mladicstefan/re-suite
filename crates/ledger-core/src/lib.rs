@@ -513,7 +513,14 @@ impl Claim {
             serde_json::to_value(&self.kind).ok()?,
             serde_json::to_value(&earlier.kind).ok()?,
         );
-        if now.get("kind") != was.get("kind") || self.subject() != earlier.subject() {
+        // Two claims about one endpoint are still about different things if they name
+        // different headers or statuses; one does not replace the other.
+        let topic =
+            |kind: &serde_json::Value| (kind.get("header").cloned(), kind.get("status").cloned());
+        if now.get("kind") != was.get("kind")
+            || self.subject() != earlier.subject()
+            || topic(&now) != topic(&was)
+        {
             return None;
         }
         let mut revision = Revision::default();
@@ -1844,6 +1851,21 @@ mod tests {
         let back = first.revision_of(&looser).unwrap_or_default();
         assert!(back.weaker.is_empty() && back.other.len() == 3, "{back:?}");
         assert_eq!(first.revision_of(&first), None);
+        // Claims about different headers of one endpoint, or different statuses, are not revisions.
+        let sends = |status, header: &str| Claim {
+            kind: ClaimKind::ResponseHeader(ResponseHeader {
+                endpoint: "GET /{page}".into(),
+                status,
+                header: header.into(),
+                value: serde_json::json!({"minLength": 1}),
+            }),
+            premises: BTreeSet::new(),
+        };
+        assert_eq!(sends(200, "server").revision_of(&sends(200, "etag")), None);
+        assert_eq!(
+            sends(404, "server").revision_of(&sends(200, "server")),
+            None
+        );
         assert_eq!(schema().revision_of(&first), None);
 
         // In a ledger: the looser claim is traced to the refuted one it replaces.
