@@ -265,6 +265,16 @@ impl Store {
         if !(known && file.exists()) {
             ledger_os::write_once(&file, bytes)?;
         }
+        self.index(id, kind, bytes)
+    }
+
+    /// Indexes evidence whose file is in place under `id`, and records its event.
+    fn index(
+        &self,
+        id: EvidenceId,
+        kind: EvidenceKind,
+        bytes: &[u8],
+    ) -> Result<EvidenceId, StoreError> {
         let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
         // An exchange that does not parse is still stored; its checker will say what is wrong.
         let line = (kind == EvidenceKind::HttpExchange)
@@ -307,19 +317,22 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// [`Store::add_evidence`] for a saved capture on disk, mapped rather than read into memory.
+    /// [`Store::add_evidence`] for a saved capture on disk, copied a buffer at a time
+    /// and hashed from the copy, so a source that changes meanwhile cannot be stored
+    /// under the wrong hash.
     ///
     /// # Errors
-    /// The file cannot be read or the write fails.
+    /// The path is not a regular file or cannot be read, the bytes are already stored
+    /// as another kind, or the write fails.
     pub fn add_evidence_file(
         &self,
         kind: EvidenceKind,
         path: impl AsRef<Path>,
     ) -> Result<EvidenceId, StoreError> {
-        // SAFETY: a capture handed over as evidence is a finished file. Another process
-        // truncating it while we hash and copy it could fault the read.
-        let map = unsafe { ledger_os::map(path.as_ref())? };
-        self.add_evidence(kind, &map)
+        let id = ledger_os::copy_once(path.as_ref(), &self.evidence_dir, EvidenceId::of)?;
+        // SAFETY: the file is the store's own now; see `read_evidence`.
+        let stored = unsafe { ledger_os::map(&self.evidence_dir.join(id.as_str()))? };
+        self.index(id, kind, &stored)
     }
 
     /// Evidence bytes by hash, verified against that hash. `None` if there is no such file.
@@ -846,6 +859,39 @@ mod tests {
         }
         fs::write(&file, b"GET /admin")?;
         assert!(matches!(store.evidence(&id), Err(StoreError::Corrupt(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_files_are_copied_from_regular_files_only() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("l.db");
+        let store = Store::open(&db)?;
+        let kind = EvidenceKind::MemorySnapshot;
+        // A device can feed bytes forever and a directory has none. Outside Unix,
+        // `/dev/zero` is simply missing.
+        let refused = [
+            dir.path().into(),
+            dir.path().join("missing"),
+            "/dev/zero".into(),
+        ];
+        for path in refused {
+            let added = store.add_evidence_file(kind, &path);
+            assert!(
+                matches!(added, Err(StoreError::Io(_))),
+                "{}",
+                path.display()
+            );
+        }
+        let source = dir.path().join("capture");
+        fs::write(&source, b"snapshot")?;
+        let id = store.add_evidence_file(kind, &source)?;
+        assert_eq!(id, EvidenceId::of(b"snapshot"));
+        // What is stored is a copy, so the source may change afterwards.
+        fs::write(&source, b"changed")?;
+        assert_eq!(store.evidence(&id)?.as_deref(), Some(&b"snapshot"[..]));
+        // Nothing but the evidence itself is left in the directory.
+        assert_eq!(fs::read_dir(sidecar(&db, ".evidence"))?.count(), 1);
         Ok(())
     }
 

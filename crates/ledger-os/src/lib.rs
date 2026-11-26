@@ -2,6 +2,7 @@
 //! API. Each item picks the system's behaviour at compile time with `#[cfg]`;
 //! nothing here asks which system it is on while running.
 
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::ops::Deref;
@@ -43,11 +44,8 @@ pub unsafe fn map(path: &Path) -> io::Result<Mapped> {
 /// # Errors
 /// The file cannot be written, renamed into place or flushed.
 pub fn write_once(to: &Path, bytes: &[u8]) -> io::Result<()> {
-    static TEMP: AtomicU64 = AtomicU64::new(0);
     if !to.exists() {
-        // A name of its own, so two writers of the same file cannot tear each other.
-        let n = TEMP.fetch_add(1, Ordering::Relaxed);
-        let tmp = to.with_extension(format!("{}-{n}.tmp", std::process::id()));
+        let tmp = temp(parent(to));
         let written = private().open(&tmp).and_then(|mut file| {
             file.write_all(bytes)?;
             file.sync_all()
@@ -63,6 +61,66 @@ pub fn write_once(to: &Path, bytes: &[u8]) -> io::Result<()> {
     }
     // Also when the file was there already: whoever put it there may not have got this far.
     sync_dir(parent(to))
+}
+
+/// Copies the regular file `from` into `dir`, under the name `name` gives for the
+/// bytes of the copy. Everything [`write_once`] promises holds for the copy, and the
+/// name fits the bytes stored even if `from` changes meanwhile. `from` is read a
+/// buffer at a time, so memory use does not grow with the file.
+///
+/// # Errors
+/// `from` is not a regular file or cannot be read, or the copy cannot be written,
+/// renamed into place or flushed.
+pub fn copy_once<N: fmt::Display>(
+    from: &Path,
+    dir: &Path,
+    name: impl FnOnce(&[u8]) -> N,
+) -> io::Result<N> {
+    // A device can feed bytes forever, a pipe can block the open, a directory has no bytes.
+    let regular = |meta: fs::Metadata| {
+        if meta.is_file() {
+            Ok(())
+        } else {
+            let why = format!("{} is not a regular file", from.display());
+            Err(io::Error::new(io::ErrorKind::InvalidInput, why))
+        }
+    };
+    regular(fs::metadata(from)?)?;
+    let mut source = File::open(from)?;
+    regular(source.metadata()?)?;
+    let tmp = temp(dir);
+    let named = private()
+        .open(&tmp)
+        .and_then(|mut file| {
+            io::copy(&mut source, &mut file)?;
+            file.sync_all()
+        })
+        .and_then(|()| {
+            // SAFETY: the copy is this call's own file, and it is written no more.
+            let named = name(&unsafe { map(&tmp) }?);
+            let to = dir.join(named.to_string());
+            // Another writer of the same content may be there first; see `write_once`.
+            if !to.exists()
+                && let Err(e) = fs::rename(&tmp, &to)
+                && !to.exists()
+            {
+                return Err(e);
+            }
+            Ok(named)
+        });
+    // Gone in every case: renamed into place, not needed, or never finished.
+    let _ = fs::remove_file(&tmp);
+    let named = named?;
+    sync_dir(dir)?;
+    Ok(named)
+}
+
+/// A name in `dir` for a file being written, which no other writer in any process
+/// uses, so two writers of the same file cannot tear each other.
+fn temp(dir: &Path) -> PathBuf {
+    static TEMP: AtomicU64 = AtomicU64::new(0);
+    let n = TEMP.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!("{}-{n}.tmp", std::process::id()))
 }
 
 /// Creates the directory `dir`, and any missing ones above it, for files only this
@@ -206,6 +264,46 @@ mod tests {
         // A bare file name lives in the current directory, which can be flushed.
         assert_eq!(parent(Path::new("ledger.db.evidence")), Path::new("."));
         assert_eq!(parent(Path::new("a/b")), Path::new("a"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_regular_file_is_copied_once_under_the_name_of_its_bytes() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (from, to) = (dir.path().join("capture"), dir.path().join("store"));
+        fs::create_dir(&to)?;
+        fs::write(&from, b"evidence")?;
+        assert_eq!(copy_once(&from, &to, <[u8]>::len)?, 8);
+        // SAFETY: nothing else knows this file.
+        assert_eq!(&unsafe { map(&to.join("8")) }?[..], b"evidence");
+        // A name that is taken keeps its file.
+        fs::write(&from, b"other")?;
+        copy_once(&from, &to, |_| 8)?;
+        // SAFETY: as above.
+        assert_eq!(&unsafe { map(&to.join("8")) }?[..], b"evidence");
+        // Only a regular file is copied, and a copy that cannot be placed leaves nothing.
+        assert!(copy_once(dir.path(), &to, |_| "x").is_err());
+        assert!(copy_once(&from, &to, |_| "missing/x").is_err());
+        assert_eq!(fs::read_dir(&to)?.count(), 1);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn devices_and_pipes_are_not_copied() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let fifo = dir.path().join("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()?
+                .success()
+        );
+        // One never ends, and the other would block the open until someone writes it.
+        for from in [Path::new("/dev/zero"), &fifo] {
+            let refused = copy_once(from, dir.path(), |_| "x").map_err(|e| e.kind());
+            assert_eq!(refused.err(), Some(io::ErrorKind::InvalidInput));
+        }
         Ok(())
     }
 
