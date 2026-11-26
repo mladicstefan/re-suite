@@ -22,6 +22,8 @@ const SHORT: usize = 12;
 const SENTENCE: usize = 160;
 /// Verdicts and premises listed by `explain` before it summarises the rest.
 const LISTED: usize = 5;
+/// Differences from a refuted claim listed before the rest are counted.
+const SHOWN: usize = 3;
 const CHECK_LIMIT: Duration = Duration::from_secs(5);
 
 /// A refusal an agent can act on: a stable code, what it is about, and what to do next.
@@ -221,6 +223,33 @@ fn holding(ledger: &Ledger, claim: &Claim) -> Option<String> {
     })
 }
 
+/// One line saying which refuted claim this one replaces and what it gave up, if any.
+fn lineage(ledger: &Ledger, id: &ClaimId) -> Option<String> {
+    let (earlier, revision) = ledger.revised_from(id)?;
+    let shown = |items: &[String]| {
+        let first: Vec<&str> = items.iter().take(SHOWN).map(String::as_str).collect();
+        match items.len().saturating_sub(SHOWN) {
+            0 => first.join("; "),
+            more => format!("{}; and {more} more", first.join("; ")),
+        }
+    };
+    let earlier = short(earlier.as_str());
+    Some(
+        match (revision.weaker.is_empty(), revision.other.is_empty()) {
+            (false, true) => format!("weaker than refuted {earlier}: {}", shown(&revision.weaker)),
+            (false, false) => format!(
+                "replaces refuted {earlier}; weaker in: {}; also changed: {}",
+                shown(&revision.weaker),
+                shown(&revision.other)
+            ),
+            _ => format!(
+                "replaces refuted {earlier}; changed: {}",
+                shown(&revision.other)
+            ),
+        },
+    )
+}
+
 fn stamp(snapshot: &Snapshot, body: &str) -> String {
     format!("seq {}\n{body}", snapshot.seq)
 }
@@ -325,6 +354,9 @@ pub fn propose(store: &Store, mut claim: Claim, evidence: &[String]) -> Result<S
     }
     if reused {
         out.push_str("\nalready checked on exactly this evidence; not replayed");
+    }
+    if let Some(line) = lineage(&after.ledger, &id) {
+        let _ = write!(out, "\n{line}");
     }
     Ok(stamp(&after, &out))
 }
@@ -583,6 +615,9 @@ pub fn explain(store: &Store, claim: &str) -> Result<String, Rejection> {
     };
     if let Some(why) = holding(ledger, claim) {
         let _ = write!(out, "\n{why}");
+    }
+    if let Some(line) = lineage(ledger, &id) {
+        let _ = write!(out, "\n{line}");
     }
     for premise in claim.premises.iter().take(LISTED) {
         let _ = write!(out, "\npremise: {}", row_of(ledger, premise));
@@ -921,6 +956,66 @@ mod tests {
         );
         insta::assert_snapshot!("har_import", log);
         assert!(!log.contains("s3cret"), "a query string was echoed");
+        Ok(())
+    }
+
+    #[test]
+    fn a_claim_that_says_less_than_a_refuted_one_is_marked() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let capture = |name: &str, body: &str| -> Result<String, Box<dyn std::error::Error>> {
+            let exchange = rmcp::serde_json::json!({
+                "request": {"method": "GET", "url": format!("https://code.example/repos/{name}")},
+                "response": {"status": 200, "body": {"text": body}},
+            });
+            let file = dir.path().join(format!("{name}.json"));
+            std::fs::write(&file, exchange.to_string())?;
+            let added = add_evidence(
+                &store,
+                EvidenceKind::HttpExchange,
+                file.to_str().ok_or("path")?,
+            )
+            .map_err(|r| r.to_string())?;
+            Ok(added.rsplit(' ').next().unwrap_or_default().to_owned())
+        };
+        let evidence = [
+            capture(
+                "org",
+                r#"{"id": 1, "organization": {"login": "rust-lang"}, "homepage": "https://x"}"#,
+            )?,
+            capture("user", r#"{"id": 2, "homepage": null}"#)?,
+        ];
+        let record = |schema| Claim {
+            kind: ClaimKind::ResponseSchema(ledger_core::ResponseSchema {
+                endpoint: "GET code.example/repos/{name}".into(),
+                status: 200,
+                schema,
+            }),
+            premises: BTreeSet::new(),
+        };
+        let mut log = String::new();
+        let mut say = |what: &str, result: Result<String, Rejection>| {
+            let text = result.unwrap_or_else(|r| format!("REJECTED {r}"));
+            let _ = write!(log, "{what}\n{text}\n\n");
+            text
+        };
+        let first = rmcp::serde_json::json!({"required": ["id", "organization"], "properties": {"homepage": {"type": "string"}}});
+        say(
+            "first guess, from the organisation's record",
+            propose(&store, record(first), &evidence),
+        );
+        let looser = rmcp::serde_json::json!({"required": ["id"], "properties": {"homepage": {"type": ["string", "null"]}}});
+        let second = say(
+            "the same claim with what failed taken out",
+            propose(&store, record(looser), &evidence),
+        );
+        say("explain it", explain(&store, id_in(&second)));
+        let other = rmcp::serde_json::json!({"required": ["id"], "properties": {"id": {"type": "integer"}}});
+        say(
+            "a claim that drops things and adds one",
+            propose(&store, record(other), &evidence),
+        );
+        insta::assert_snapshot!("revision", log);
         Ok(())
     }
 

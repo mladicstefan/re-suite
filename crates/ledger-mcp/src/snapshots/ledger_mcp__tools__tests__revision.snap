@@ -1,0 +1,24 @@
+---
+source: crates/ledger-mcp/src/tools.rs
+expression: log
+---
+first guess, from the organisation's record
+seq 4
+refuted      5a12b92d3d95  200 responses to `GET code.example/repos/{name}` match JSON Schema 3227e5d5: 1 properties, 2 required.
+refuted by 357c20197c84: "organization" is a required property at the top level
+
+the same claim with what failed taken out
+seq 6
+held         edd69c4cce72  200 responses to `GET code.example/repos/{name}` match JSON Schema af98628e: 1 properties, 1 required.
+weaker than refuted 5a12b92d3d95: /schema/properties/homepage/type now also allows "null"; /schema/required no longer asks for "organization"
+
+explain it
+seq 6
+held         edd69c4cce72  200 responses to `GET code.example/repos/{name}` match JSON Schema af98628e: 1 properties, 1 required.
+weaker than refuted 5a12b92d3d95: /schema/properties/homepage/type now also allows "null"; /schema/required no longer asks for "organization"
+held on 2 runs (replayed, not proved)
+
+a claim that drops things and adds one
+seq 8
+held         e2c04b270fb0  200 responses to `GET code.example/repos/{name}` match JSON Schema 7f91d0b1: 1 properties, 1 required.
+replaces refuted 5a12b92d3d95; weaker in: /schema/properties/homepage dropped; /schema/required no longer asks for "organization"; also changed: /schema/properties/id added

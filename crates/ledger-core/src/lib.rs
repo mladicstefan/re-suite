@@ -461,6 +461,22 @@ impl Claim {
         }
     }
 
+    /// How this claim differs from `earlier`, if both are of one kind and about one
+    /// subject and do differ. Premises are not compared.
+    #[must_use]
+    pub fn revision_of(&self, earlier: &Self) -> Option<Revision> {
+        let (now, was) = (
+            serde_json::to_value(&self.kind).ok()?,
+            serde_json::to_value(&earlier.kind).ok()?,
+        );
+        if now.get("kind") != was.get("kind") || self.subject() != earlier.subject() {
+            return None;
+        }
+        let mut revision = Revision::default();
+        revision.compare("", "", &was, &now);
+        (revision != Revision::default()).then_some(revision)
+    }
+
     /// Plain sentence shown to the human.
     #[must_use]
     pub fn sentence(&self) -> String {
@@ -1163,6 +1179,126 @@ pub enum Status {
     Retracted,
 }
 
+/// How a claim differs from an earlier claim of the same kind about the same subject.
+/// After a refutation the tempting fix is to say less until the check passes;
+/// this makes what was given up visible.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Revision {
+    /// What the earlier claim asked for that this one dropped or loosened.
+    pub weaker: Vec<String>,
+    /// Every other difference: something added, tightened or replaced.
+    pub other: Vec<String>,
+}
+
+impl Revision {
+    /// Walks two claims' JSON side by side. Which direction is "weaker" depends on what
+    /// a value means, and that is read off its key: a `required` list asks for more with
+    /// every entry, an allow-list (`statuses`, `enum`, `type`) permits more with every entry.
+    fn compare(&mut self, path: &str, key: &str, old: &serde_json::Value, new: &serde_json::Value) {
+        use serde_json::Value as V;
+        const NOTES: [&str; 4] = ["title", "description", "$comment", "examples"];
+        const FLOORS: [&str; 6] = [
+            "min",
+            "minimum",
+            "minLength",
+            "minItems",
+            "min_chars",
+            "exclusiveMinimum",
+        ];
+        const CEILINGS: [&str; 5] = [
+            "max",
+            "maximum",
+            "maxLength",
+            "maxItems",
+            "exclusiveMaximum",
+        ];
+        let plain = |values: &[V]| values.iter().all(|v| !v.is_object() && !v.is_array());
+        match (old, new) {
+            _ if old == new => {}
+            (V::Object(a), V::Object(b)) => {
+                for (k, was) in a.iter().filter(|(k, _)| !NOTES.contains(&k.as_str())) {
+                    match b.get(k) {
+                        Some(now) => self.compare(&format!("{path}/{k}"), k, was, now),
+                        None => self.weaker.push(format!("{path}/{k} dropped")),
+                    }
+                }
+                let added = b
+                    .keys()
+                    .filter(|k| !a.contains_key(*k) && !NOTES.contains(&k.as_str()));
+                self.other
+                    .extend(added.map(|k| format!("{path}/{k} added")));
+            }
+            (V::Array(a), V::Array(b)) if plain(a) && plain(b) => {
+                self.compare_sets(path, key, a, b);
+            }
+            (V::Array(a), V::Array(b)) => {
+                for at in 0..a.len().max(b.len()) {
+                    match (a.get(at), b.get(at)) {
+                        (Some(was), Some(now)) => {
+                            self.compare(&format!("{path}/{at}"), key, was, now);
+                        }
+                        (Some(_), None) => self.weaker.push(format!("{path}/{at} dropped")),
+                        _ => self.other.push(format!("{path}/{at} added")),
+                    }
+                }
+            }
+            (V::String(_), V::Array(b)) if key == "type" && b.contains(old) => {
+                self.compare_sets(path, key, std::slice::from_ref(old), b);
+            }
+            (V::Number(a), V::Number(b)) if FLOORS.contains(&key) || CEILINGS.contains(&key) => {
+                let (was, now) = (a.as_f64().unwrap_or(0.0), b.as_f64().unwrap_or(0.0));
+                let looser = if FLOORS.contains(&key) {
+                    now < was
+                } else {
+                    now > was
+                };
+                let side = if looser {
+                    &mut self.weaker
+                } else {
+                    &mut self.other
+                };
+                side.push(format!("{path} was {a}, now {b}"));
+            }
+            (V::Bool(true), V::Bool(false)) if key == "exact" => {
+                self.weaker.push(format!("{path} no longer holds"));
+            }
+            _ => self.other.push(format!("{path} was {old}, now {new}")),
+        }
+    }
+
+    /// Two lists of plain values, compared as sets.
+    fn compare_sets(
+        &mut self,
+        path: &str,
+        key: &str,
+        old: &[serde_json::Value],
+        new: &[serde_json::Value],
+    ) {
+        let allows = matches!(key, "statuses" | "tags" | "one_of" | "enum" | "type");
+        let only_in = |these: &[serde_json::Value], those: &[serde_json::Value]| {
+            let missing = these.iter().filter(|v| !those.contains(v));
+            missing
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let (gone, came) = (only_in(old, new), only_in(new, old));
+        // Entries leaving a list of requirements loosen the claim; entries joining an allow-list do.
+        let (loosened, tightened) = if allows { (came, gone) } else { (gone, came) };
+        let (loosening, tightening) = if allows {
+            ("now also allows", "no longer allows")
+        } else {
+            ("no longer asks for", "now also asks for")
+        };
+        if !loosened.is_empty() {
+            self.weaker.push(format!("{path} {loosening} {loosened}"));
+        }
+        if !tightened.is_empty() {
+            self.other.push(format!("{path} {tightening} {tightened}"));
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
     id: ClaimId,
@@ -1334,6 +1470,19 @@ impl Ledger {
             }
         }
         dependents
+    }
+
+    /// The refuted claim, proposed earlier, of the same kind and subject that this
+    /// claim differs least from: the one it most likely replaces.
+    #[must_use]
+    pub fn revised_from(&self, id: &ClaimId) -> Option<(&ClaimId, Revision)> {
+        let at = *self.index.get(id)?;
+        let claim = &self.entries[at].claim;
+        let statuses: Vec<Status> = self.statuses().map(|(_, status)| status).collect();
+        (self.entries[..at].iter().zip(statuses))
+            .filter(|(_, status)| *status == Status::Refuted)
+            .filter_map(|(earlier, _)| Some((&earlier.id, claim.revision_of(&earlier.claim)?)))
+            .min_by_key(|(_, revision)| revision.weaker.len() + revision.other.len())
     }
 
     /// Derived from verdicts and premises. Settles the claim's premise closure
@@ -1601,6 +1750,70 @@ mod tests {
             admit(table(Some(8), 3, 2)).is_err(),
             "three strings of two characters need nine bytes"
         );
+    }
+
+    #[test]
+    fn a_revision_shows_what_was_given_up() -> Result<(), CoreError> {
+        let record = |schema| Claim {
+            kind: ClaimKind::ResponseSchema(ResponseSchema {
+                endpoint: "GET /repos/{owner}/{repo}".into(),
+                status: 200,
+                schema,
+            }),
+            premises: BTreeSet::new(),
+        };
+        let first = record(serde_json::json!({
+            "required": ["id", "organization"],
+            "properties": {"homepage": {"type": "string"}, "stars": {"minimum": 10}},
+        }));
+        let looser = record(serde_json::json!({
+            "required": ["id"],
+            "properties": {"homepage": {"type": ["string", "null"]}, "stars": {"minimum": 0}},
+        }));
+        let revision = looser.revision_of(&first).unwrap_or_default();
+        assert_eq!(revision.other, Vec::<String>::new());
+        assert_eq!(
+            revision.weaker,
+            [
+                "/schema/properties/homepage/type now also allows \"null\"",
+                "/schema/properties/stars/minimum was 10, now 0",
+                "/schema/required no longer asks for \"organization\"",
+            ]
+        );
+        // The other way round nothing was given up, and a claim about another endpoint is no revision.
+        let back = first.revision_of(&looser).unwrap_or_default();
+        assert!(back.weaker.is_empty() && back.other.len() == 3, "{back:?}");
+        assert_eq!(first.revision_of(&first), None);
+        assert_eq!(schema().revision_of(&first), None);
+
+        // In a ledger: the looser claim is traced to the refuted one it replaces.
+        let mut l = Ledger::default();
+        let (first_id, looser_id) = (first.id()?, looser.id()?);
+        l.apply(Event::Proposed {
+            claim: admit(first)?,
+        })?;
+        l.apply(Event::Proposed {
+            claim: admit(looser)?,
+        })?;
+        assert_eq!(l.revised_from(&looser_id), None, "nothing is refuted yet");
+        l.apply(Event::Checked {
+            claim: first_id.clone(),
+            evidence: BTreeSet::new(),
+            verdict: Verdict::Refuted {
+                counterexample: Counterexample {
+                    evidence: EvidenceId::of(b"e"),
+                    detail: String::new(),
+                },
+            },
+            checker: None,
+        })?;
+        assert_eq!(
+            l.revised_from(&looser_id)
+                .map(|(id, r)| (id.clone(), r.weaker.len())),
+            Some((first_id.clone(), 3))
+        );
+        assert_eq!(l.revised_from(&first_id), None, "only earlier claims count");
+        Ok(())
     }
 
     #[test]
