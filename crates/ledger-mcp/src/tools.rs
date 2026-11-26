@@ -172,6 +172,10 @@ fn only<'a, T: fmt::Display>(
     text: &str,
     unknown: fn(&str) -> Rejection,
 ) -> Result<&'a T, Rejection> {
+    // Every id starts with the empty string, so it would name the only one there is.
+    if text.is_empty() {
+        return Err(unknown(text));
+    }
     match (matches.next(), matches.next()) {
         (Some(id), None) => Ok(id),
         (None, _) => Err(unknown(text)),
@@ -885,6 +889,11 @@ mod tests {
             rmcp::serde_json::from_value(rmcp::serde_json::Value::String(text.into()))
         };
         let (key, unknown_key, not_a_key) = (cite(&key)?, cite("0123abcd")?, cite(&request)?);
+        // Every id starts with the empty string; with one claim and one piece of evidence
+        // it must still name neither.
+        let lone = Store::open(dir.path().join("lone.db"))?;
+        add_evidence(&lone, EvidenceKind::Secret, key_path).map_err(|r| r.to_string())?;
+        propose(&lone, layout("T", 8, &[])?, &[]).map_err(|r| r.to_string())?;
         let signature = |endpoint: &str, key: &EvidenceId| Claim {
             kind: ClaimKind::RequestSignature(RequestSignature {
                 endpoint: endpoint.into(),
@@ -925,6 +934,9 @@ mod tests {
                 EvidenceKind::MemorySnapshot,
                 "/no/such/capture.bin",
             )),
+            rejected(explain(&lone, "")),
+            rejected(retract(&lone, "", String::new())),
+            rejected(propose(&lone, layout("U", 8, &[])?, &[String::new()])),
         ];
         insta::assert_snapshot!("rejections", all.join("\n"));
         Ok(())

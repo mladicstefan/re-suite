@@ -15,6 +15,9 @@ argument_missing [claim]: about=claim needs `claim`. Next: Call ask again with t
 argument_missing [subject]: about=subject needs `subject`. Next: Call ask again with that argument.
 claim_unknown [0123abcd]: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
 claim_unknown [0123abcd]: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
-id_ambiguous []: More than one id starts with this. Next: Give more characters of the id.
+claim_unknown []: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
 claim_unknown [0123abcd]: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
 evidence_unreadable [path]: No such file or directory (os error 2). Next: Check that the path is a local file this server can read.
+claim_unknown []: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
+claim_unknown []: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
+evidence_unknown []: No evidence has this id. Next: Call add_evidence with the capture file first.
