@@ -39,6 +39,8 @@ pub enum StoreError {
     Closed,
     #[error("ledger file {} is already open in another store", .0.display())]
     InUse(PathBuf),
+    #[error("evidence {0} is already stored as {1:?}; the same bytes cannot be another kind")]
+    OtherKind(EvidenceId, EvidenceKind),
 }
 
 // `kind` is generated from the payload so the two can never disagree.
@@ -247,11 +249,11 @@ impl Store {
     }
 
     /// Stores bytes as a file named by their content hash, indexes it and records
-    /// an `EvidenceAdded` event. Does nothing if the hash is already indexed.
+    /// an `EvidenceAdded` event. Does nothing if the hash is already indexed as this kind.
     /// Hashing and the file write happen on the calling thread, not the writer.
     ///
     /// # Errors
-    /// The file or the index cannot be written.
+    /// The bytes are already stored as another kind, or the file or the index cannot be written.
     pub fn add_evidence(&self, kind: EvidenceKind, bytes: &[u8]) -> Result<EvidenceId, StoreError> {
         let id = EvidenceId::of(bytes);
         // The file is whole and on the disk under its hash before the event that names
@@ -501,6 +503,11 @@ fn stage(
     let (events, evidence) = match work {
         Work::Events(events) => (events, None),
         Work::Evidence(id, kind, size, about) => {
+            if let Some(stored) = next.ledger.evidence_kind(&id)
+                && stored != kind
+            {
+                return Ok(Err(StoreError::OtherKind(id, stored)));
+            }
             let indexed = "SELECT 1 FROM evidence WHERE hash = ?1";
             if tx.prepare_cached(indexed)?.exists([id.as_str()])? {
                 return Ok(Ok(()));
@@ -839,6 +846,27 @@ mod tests {
         }
         fs::write(&file, b"GET /admin")?;
         assert!(matches!(store.evidence(&id), Err(StoreError::Corrupt(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_keeps_the_kind_it_was_added_as() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let id = store.add_evidence(EvidenceKind::MemorySnapshot, b"key")?;
+        let seq = store.snapshot().seq;
+        assert_eq!(
+            store.add_evidence(EvidenceKind::MemorySnapshot, b"key")?,
+            id
+        );
+        let again = store.add_evidence(EvidenceKind::Secret, b"key");
+        assert!(matches!(
+            again,
+            Err(StoreError::OtherKind(_, EvidenceKind::MemorySnapshot))
+        ));
+        let kind = store.snapshot().ledger.evidence_kind(&id);
+        assert_eq!(kind, Some(EvidenceKind::MemorySnapshot));
+        assert_eq!(store.snapshot().seq, seq);
         Ok(())
     }
 
