@@ -388,7 +388,10 @@ pub fn propose(store: &Store, mut claim: Claim, evidence: &[String]) -> Result<S
     }
     let after = store.snapshot();
     let mut out = row_of(&after.ledger, &id);
-    if let Some(Verdict::Refuted { counterexample: c }) = after.ledger.verdicts(&id).last() {
+    // The first refutation is why the claim is refuted, whatever was checked after it.
+    let refuted =
+        (after.ledger.verdicts(&id).iter()).find(|v| matches!(v, Verdict::Refuted { .. }));
+    if let Some(Verdict::Refuted { counterexample: c }) = refuted {
         let _ = write!(
             out,
             "\nrefuted by {}: {}",
@@ -630,8 +633,15 @@ pub fn explain(store: &Store, claim: &str) -> Result<String, Rejection> {
         let _ = write!(out, "\npremise: {}", row_of(ledger, premise));
     }
     let verdicts = ledger.verdicts(&id);
-    let earlier = verdicts.len().saturating_sub(LISTED);
-    for verdict in &verdicts[earlier..] {
+    let mut earlier = verdicts.len().saturating_sub(LISTED);
+    // The first refutation is why the claim is refuted, so it is listed even when older.
+    let refuted = verdicts
+        .iter()
+        .position(|v| matches!(v, Verdict::Refuted { .. }));
+    let first = refuted.filter(|&at| at < earlier);
+    let listed = first.into_iter().chain(earlier..verdicts.len());
+    earlier -= usize::from(first.is_some());
+    for verdict in listed.map(|at| &verdicts[at]) {
         let _ = match verdict {
             Verdict::Held { runs } => write!(out, "\nheld on {runs} runs (replayed, not proved)"),
             Verdict::Refuted { counterexample: c } => {
@@ -1170,6 +1180,37 @@ mod tests {
             propose(&store, record(other), &evidence),
         );
         insta::assert_snapshot!("revision", log);
+        Ok(())
+    }
+
+    #[test]
+    fn a_refuted_claim_always_shows_its_counterexample() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let snapshot = |len: usize| -> Result<String, Box<dyn std::error::Error>> {
+            let file = dir.path().join(format!("{len}.bin"));
+            std::fs::write(&file, vec![0u8; len])?;
+            let path = file.to_str().ok_or("path")?;
+            let added = add_evidence(&store, EvidenceKind::MemorySnapshot, path)
+                .map_err(|r| r.to_string())?;
+            Ok(added.rsplit(' ').next().unwrap_or_default().to_owned())
+        };
+        let boss = || layout("Boss", 64, &[]);
+        propose(&store, boss()?, &[snapshot(32)?]).map_err(|r| r.to_string())?;
+        // Later checks on snapshots that are large enough hold; the claim stays refuted.
+        let mut last = String::new();
+        for len in 64..64 + LISTED {
+            last = propose(&store, boss()?, &[snapshot(len)?]).map_err(|r| r.to_string())?;
+        }
+        let explained = explain(&store, id_in(&last)).map_err(|r| r.to_string())?;
+        let why = "refuted by 1a541fc8f6f7: snapshot is 32 bytes, `Boss` needs 64";
+        assert!(
+            last.contains(why) && explained.contains(why),
+            "{last}\n\n{explained}"
+        );
+        let held = explained.lines().filter(|l| l.starts_with("held on"));
+        assert_eq!(held.count(), LISTED);
+        assert!(!explained.contains("not shown"), "{explained}");
         Ok(())
     }
 
