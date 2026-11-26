@@ -631,11 +631,59 @@ impl<'e> Checker<'e> for RelationChecker {
     }
 }
 
+pub struct TaggedRecordsChecker;
+
+impl<'e> Checker<'e> for TaggedRecordsChecker {
+    const ID: &'static str = "tagged_records";
+    const VERSION: u32 = 1;
+    type Claim = ledger_core::TaggedRecords;
+    type Evidence = &'e [u8];
+
+    fn check(
+        &self,
+        claim: &Self::Claim,
+        evidence: &[Item<&'e [u8]>],
+        deadline: Instant,
+    ) -> Result<Verdict, CheckError> {
+        Ok(replay(evidence, deadline, |bytes| {
+            let len = bytes.len() as u64;
+            let head = claim.size_len + claim.tag_len;
+            let (mut at, mut seen) = (claim.start, 0u64);
+            // Each record moves `at` forward by at least its head, so the walk ends.
+            while claim.count.map_or(at != len, |count| seen < count) {
+                let past =
+                    || format!("record {seen} at +{at:#x} runs past the end of the snapshot");
+                let size = slice(bytes, at, claim.size_len)
+                    .map(uint)
+                    .ok_or_else(past)?;
+                let tag = slice(bytes, at + claim.size_len, claim.tag_len)
+                    .map(uint)
+                    .ok_or_else(past)?;
+                if !claim.tags.is_empty() && !claim.tags.contains(&tag) {
+                    return Err(format!(
+                        "record {seen} at +{at:#x} has tag {tag}, which is not a claimed tag"
+                    ));
+                }
+                let left = len - at - head;
+                if size > left {
+                    return Err(format!(
+                        "record {seen} at +{at:#x} claims {size} bytes of value, but {left} remain"
+                    ));
+                }
+                at += head + size;
+                seen += 1;
+            }
+            Ok(())
+        }))
+    }
+}
+
 /// The checker that `check_claim` runs for a claim, by id and version. With the
 /// claim and the evidence, this is what a recorded verdict is cached on.
 #[must_use]
 pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
     let (id, version) = match claim {
+        ClaimKind::TaggedRecords(_) => (TaggedRecordsChecker::ID, TaggedRecordsChecker::VERSION),
         ClaimKind::FieldRelation(_) => (RelationChecker::ID, RelationChecker::VERSION),
         ClaimKind::RecordArray(_) => (RecordArrayChecker::ID, RecordArrayChecker::VERSION),
         ClaimKind::StatusSet(_) => (StatusChecker::ID, StatusChecker::VERSION),
@@ -736,6 +784,9 @@ pub fn check_claim(
 ) -> Result<Verdict, CheckError> {
     let any_status = |_: Option<u16>| None;
     match claim {
+        ClaimKind::TaggedRecords(c) => {
+            run(&TaggedRecordsChecker, id, c, snapshots(evidence), limit)
+        }
         ClaimKind::FieldRelation(c) => run(&RelationChecker, id, c, snapshots(evidence), limit),
         ClaimKind::RecordArray(c) => run(&RecordArrayChecker, id, c, snapshots(evidence), limit),
         ClaimKind::StatusSet(c) => {
@@ -1437,6 +1488,66 @@ mod tests {
         assert_eq!(
             detail(&claim(56, Relation::SnapshotLength), &total),
             "the value at +0x38 is 56, but the snapshot's length is 60"
+        );
+    }
+
+    /// Trial 1's save body: (size, token, value) records, as in `04 00 21 0b 03 00 00 00`.
+    #[test]
+    fn tagged_records_are_walked_to_their_end() {
+        let record = |tag: u16, value: &[u8]| {
+            let mut bytes = u16::try_from(value.len())
+                .unwrap_or(0)
+                .to_le_bytes()
+                .to_vec();
+            bytes.extend(tag.to_le_bytes());
+            bytes.extend(value);
+            bytes
+        };
+        let body = [
+            record(2849, &[3, 0, 0, 0]),
+            record(892, &[12, 0, 0, 0]),
+            record(1920, b"c1a1f\0\0\0"),
+        ]
+        .concat();
+        let claim = |count, tags: &[u64]| ledger_core::TaggedRecords {
+            type_name: "GameHeader".into(),
+            start: 0,
+            size_len: 2,
+            tag_len: 2,
+            count,
+            tags: tags.iter().copied().collect(),
+        };
+        let detail = |claim: &ledger_core::TaggedRecords, bytes: &[u8]| match TaggedRecordsChecker
+            .check(claim, &[item(b"e", bytes)], soon())
+        {
+            Ok(Verdict::Refuted { counterexample }) => counterexample.detail,
+            Ok(Verdict::Held { .. }) => "held".to_owned(),
+            other => format!("{other:?}"),
+        };
+        assert_eq!(detail(&claim(None, &[]), &body), "held");
+        assert_eq!(detail(&claim(Some(3), &[2849, 892, 1920]), &body), "held");
+        assert_eq!(
+            detail(&claim(Some(2), &[2849, 892]), &body),
+            "held",
+            "a count stops the walk early"
+        );
+        assert_eq!(
+            detail(&claim(None, &[2849, 892]), &body),
+            "record 2 at +0x10 has tag 1920, which is not a claimed tag"
+        );
+        assert_eq!(
+            detail(&claim(Some(4), &[]), &body),
+            "record 3 at +0x1c runs past the end of the snapshot"
+        );
+        // One byte short: the last record claims more than is left, and a stray byte is not a record.
+        assert_eq!(
+            detail(&claim(None, &[]), &body[..body.len() - 1]),
+            "record 2 at +0x10 claims 8 bytes of value, but 7 remain"
+        );
+        let stray = [body.clone(), vec![0xFF]].concat();
+        assert_eq!(
+            detail(&claim(None, &[]), &stray),
+            "record 3 at +0x1c runs past the end of the snapshot"
         );
     }
 

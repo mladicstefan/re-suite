@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "run(Some(3), &[2849, 892, 1920]).sentence()"
+---
+`GameHeader` is a run of records from +0x0, each a 2-byte size, a 2-byte tag and that many bytes of value: 3 of them, with tags 892, 1920, 2849.

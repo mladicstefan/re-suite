@@ -340,9 +340,29 @@ pub struct FieldRelation {
     pub equals: Relation,
 }
 
+/// A run of records, each a size, a tag and that many bytes of value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TaggedRecords {
+    pub type_name: String,
+    /// Where the first record starts.
+    pub start: u64,
+    /// Bytes in a record's size field, which comes first: 1, 2 or 4.
+    pub size_len: u64,
+    /// Bytes in a record's tag field, which follows the size: 1, 2 or 4.
+    pub tag_len: u64,
+    /// How many records there are. Without it the run goes to the end of the
+    /// snapshot and must end exactly there.
+    #[serde(default)]
+    pub count: Option<u64>,
+    /// The tags that may appear. Empty means any tag.
+    #[serde(default)]
+    pub tags: BTreeSet<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimKind {
+    TaggedRecords(TaggedRecords),
     FieldRelation(FieldRelation),
     RecordArray(RecordArray),
     StatusSet(StatusSet),
@@ -375,6 +395,7 @@ impl Claim {
     #[must_use]
     pub const fn subject(&self) -> &str {
         match &self.kind {
+            ClaimKind::TaggedRecords(t) => t.type_name.as_str(),
             ClaimKind::FieldRelation(r) => r.type_name.as_str(),
             ClaimKind::RecordArray(r) => r.type_name.as_str(),
             ClaimKind::StatusSet(s) => s.endpoint.as_str(),
@@ -390,102 +411,15 @@ impl Claim {
     #[must_use]
     pub fn sentence(&self) -> String {
         match &self.kind {
-            ClaimKind::FieldRelation(r) => {
-                let equals = match &r.equals {
-                    Relation::BytesAfter { from } => {
-                        format!("the number of bytes after +{from:#x}")
-                    }
-                    Relation::SnapshotLength => "the length of the whole snapshot".to_owned(),
-                    Relation::Sum { fields, plus } => {
-                        let at: Vec<String> =
-                            fields.iter().map(|f| format!("+{:#x}", f.offset)).collect();
-                        let constant = match plus {
-                            0 => String::new(),
-                            n if *n > 0 => format!(" plus {n}"),
-                            n => format!(" minus {}", n.unsigned_abs()),
-                        };
-                        format!("the sum of the values at {}{constant}", at.join(", "))
-                    }
-                };
-                format!(
-                    "In `{}`, the {}-byte value at +{:#x} equals {equals}.",
-                    r.type_name, r.field.len, r.field.offset
-                )
-            }
-            ClaimKind::RecordArray(r) => {
-                let end = if r.exact {
-                    ", and nothing after them"
-                } else {
-                    ""
-                };
-                let checked = r.fields.iter().filter(|f| f.is.is_some()).count();
-                let fields = match r.fields.len() {
-                    0 => String::new(),
-                    all => format!(" Contents checked for {checked} of {all} fields per record."),
-                };
-                format!(
-                    "`{}` has a {}-byte count at +{:#x}, then that many {}-byte records from +{:#x}{end}.{fields}",
-                    r.type_name, r.count_len, r.count_offset, r.stride, r.first
-                )
-            }
-            ClaimKind::StatusSet(s) => {
-                let statuses: Vec<String> = s.statuses.iter().map(u16::to_string).collect();
-                format!(
-                    "`{}` only answers with {}.",
-                    s.endpoint,
-                    statuses.join(", ")
-                )
-            }
-            ClaimKind::RequestBodySchema(b) => {
-                format!(
-                    "`{}` request bodies match {}.",
-                    b.endpoint,
-                    schema_summary(&b.schema)
-                )
-            }
-            ClaimKind::RequestHeader(h) if h.value == serde_json::Value::Bool(true) => {
-                format!("`{}` requests carry header `{}`.", h.endpoint, h.header)
-            }
-            ClaimKind::RequestHeader(h) => format!(
-                "`{}` requests carry header `{}` with a value matching JSON Schema {}.",
-                h.endpoint,
-                h.header,
-                schema_print(&h.value)
-            ),
-            ClaimKind::MemoryLayout(m) if m.fields.is_empty() => {
-                format!("`{}` is {} bytes.", m.type_name, m.size)
-            }
-            ClaimKind::MemoryLayout(m) => {
-                let field = |f: &FieldLayout| match &f.is {
-                    Some(kind) => format!("{} at +{:#x} ({kind})", f.name, f.offset),
-                    None => format!("{} at +{:#x}", f.name, f.offset),
-                };
-                // The count comes first: lists cut long sentences, and it must survive the cut.
-                format!(
-                    "`{}` is {} bytes, contents checked for {} of {} fields: {}.",
-                    m.type_name,
-                    m.size,
-                    m.fields.iter().filter(|f| f.is.is_some()).count(),
-                    m.fields.len(),
-                    m.fields.iter().map(field).collect::<Vec<_>>().join(", ")
-                )
-            }
-            ClaimKind::RequestSignature(s) => format!(
-                "`{}` requests carry a {:?} signature of {} in header `{}`, {:?} encoded.",
-                s.endpoint,
-                s.algorithm,
-                s.signed_input(),
-                s.header,
-                s.encoding
-            ),
-            ClaimKind::ResponseSchema(r) => {
-                format!(
-                    "{} responses to `{}` match {}.",
-                    r.status,
-                    r.endpoint,
-                    schema_summary(&r.schema)
-                )
-            }
+            ClaimKind::TaggedRecords(c) => c.sentence(),
+            ClaimKind::FieldRelation(c) => c.sentence(),
+            ClaimKind::RecordArray(c) => c.sentence(),
+            ClaimKind::StatusSet(c) => c.sentence(),
+            ClaimKind::RequestBodySchema(c) => c.sentence(),
+            ClaimKind::RequestHeader(c) => c.sentence(),
+            ClaimKind::MemoryLayout(c) => c.sentence(),
+            ClaimKind::RequestSignature(c) => c.sentence(),
+            ClaimKind::ResponseSchema(c) => c.sentence(),
         }
     }
 }
@@ -576,106 +510,344 @@ fn fields_fit(fields: &[FieldLayout], size: u64) -> Result<(), String> {
     Ok(())
 }
 
+impl TaggedRecords {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        let t = self;
+        let extent = match t.count {
+            Some(count) => format!("{count} of them"),
+            None => "up to the end of the snapshot".to_owned(),
+        };
+        let listed: Vec<String> = t.tags.iter().take(6).map(u64::to_string).collect();
+        let tags = match t.tags.len() {
+            0 => String::new(),
+            all if all > 6 => {
+                format!(", with tags {} and {} more", listed.join(", "), all - 6)
+            }
+            _ => format!(", with tags {}", listed.join(", ")),
+        };
+        format!(
+            "`{}` is a run of records from +{:#x}, each a {}-byte size, a {}-byte tag and that many bytes of value: {extent}{tags}.",
+            t.type_name, t.start, t.size_len, t.tag_len
+        )
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        let t = self;
+        let width = |len: u64| matches!(len, 1 | 2 | 4);
+        if t.type_name.is_empty() || !width(t.size_len) || !width(t.tag_len) || t.count == Some(0) {
+            return Err(String::from(
+                "tagged records need a type name, size and tag fields of 1, 2 or 4 bytes, and a count above zero if one is given",
+            ));
+        }
+        if t.tags.iter().any(|tag| tag >> (t.tag_len * 8) != 0) {
+            return Err(String::from("a claimed tag does not fit the tag field"));
+        }
+
+        Ok(())
+    }
+}
+
+impl FieldRelation {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        let r = self;
+        let equals = match &r.equals {
+            Relation::BytesAfter { from } => {
+                format!("the number of bytes after +{from:#x}")
+            }
+            Relation::SnapshotLength => "the length of the whole snapshot".to_owned(),
+            Relation::Sum { fields, plus } => {
+                let at: Vec<String> = fields.iter().map(|f| format!("+{:#x}", f.offset)).collect();
+                let constant = match plus {
+                    0 => String::new(),
+                    n if *n > 0 => format!(" plus {n}"),
+                    n => format!(" minus {}", n.unsigned_abs()),
+                };
+                format!("the sum of the values at {}{constant}", at.join(", "))
+            }
+        };
+        format!(
+            "In `{}`, the {}-byte value at +{:#x} equals {equals}.",
+            r.type_name, r.field.len, r.field.offset
+        )
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        let r = self;
+        let integer = |f: &IntField| matches!(f.len, 1 | 2 | 4 | 8);
+        let summed = match &r.equals {
+            Relation::Sum { fields, .. } => !fields.is_empty() && fields.iter().all(integer),
+            Relation::BytesAfter { .. } | Relation::SnapshotLength => true,
+        };
+        if r.type_name.is_empty() || !integer(&r.field) || !summed {
+            return Err(String::from(
+                "a field relation needs a type name, integers of 1, 2, 4 or 8 bytes, and at least one field to sum",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl RecordArray {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        let r = self;
+        let end = if r.exact {
+            ", and nothing after them"
+        } else {
+            ""
+        };
+        let checked = r.fields.iter().filter(|f| f.is.is_some()).count();
+        let fields = match r.fields.len() {
+            0 => String::new(),
+            all => format!(" Contents checked for {checked} of {all} fields per record."),
+        };
+        format!(
+            "`{}` has a {}-byte count at +{:#x}, then that many {}-byte records from +{:#x}{end}.{fields}",
+            r.type_name, r.count_len, r.count_offset, r.stride, r.first
+        )
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        let r = self;
+        if r.type_name.is_empty() || r.stride == 0 || !matches!(r.count_len, 1 | 2 | 4 | 8) {
+            return Err(String::from(
+                "a record array needs a type name, a count of 1, 2, 4 or 8 bytes and a record size",
+            ));
+        }
+        if r.count_offset.saturating_add(r.count_len) > r.first {
+            return Err(String::from(
+                "the count must end before the first record starts",
+            ));
+        }
+        if let Err(why) = fields_fit(&r.fields, r.stride) {
+            return Err(String::from(&why));
+        }
+
+        Ok(())
+    }
+}
+
+impl StatusSet {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        let s = self;
+        let statuses: Vec<String> = s.statuses.iter().map(u16::to_string).collect();
+        format!(
+            "`{}` only answers with {}.",
+            s.endpoint,
+            statuses.join(", ")
+        )
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        let s = self;
+        if let Err(why) = Endpoint::parse(&s.endpoint) {
+            return Err(String::from(why));
+        }
+        if s.statuses.is_empty() || !s.statuses.iter().all(|status| (100..600).contains(status)) {
+            return Err(String::from(
+                "a status claim needs at least one status, each from 100 to 599",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl RequestBodySchema {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        let b = self;
+        format!(
+            "`{}` request bodies match {}.",
+            b.endpoint,
+            schema_summary(&b.schema)
+        )
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        let b = self;
+        if let Err(why) = Endpoint::parse(&b.endpoint) {
+            return Err(String::from(why));
+        }
+        if !(b.schema.is_object() || b.schema.is_boolean()) {
+            return Err(String::from(
+                "a request body claim needs an object or boolean schema",
+            ));
+        }
+        if accepts_everything(&b.schema) {
+            return Err(String::from(
+                "this schema accepts every body, so nothing could refute it; say what a body must have",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl RequestHeader {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        match self {
+            h if h.value == serde_json::Value::Bool(true) => {
+                format!("`{}` requests carry header `{}`.", h.endpoint, h.header)
+            }
+            h => format!(
+                "`{}` requests carry header `{}` with a value matching JSON Schema {}.",
+                h.endpoint,
+                h.header,
+                schema_print(&h.value)
+            ),
+        }
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        let h = self;
+        if let Err(why) = Endpoint::parse(&h.endpoint) {
+            return Err(String::from(why));
+        }
+        if h.header.is_empty() || !(h.value.is_object() || h.value.is_boolean()) {
+            return Err(String::from(
+                "a header claim needs a header name and an object or boolean schema for its value",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl MemoryLayout {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        match self {
+            m if m.fields.is_empty() => {
+                format!("`{}` is {} bytes.", m.type_name, m.size)
+            }
+            m => {
+                let field = |f: &FieldLayout| match &f.is {
+                    Some(kind) => format!("{} at +{:#x} ({kind})", f.name, f.offset),
+                    None => format!("{} at +{:#x}", f.name, f.offset),
+                };
+                // The count comes first: lists cut long sentences, and it must survive the cut.
+                format!(
+                    "`{}` is {} bytes, contents checked for {} of {} fields: {}.",
+                    m.type_name,
+                    m.size,
+                    m.fields.iter().filter(|f| f.is.is_some()).count(),
+                    m.fields.len(),
+                    m.fields.iter().map(field).collect::<Vec<_>>().join(", ")
+                )
+            }
+        }
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        let m = self;
+        if m.type_name.is_empty() || m.size == 0 {
+            return Err(String::from(
+                "memory layout needs a type name and non-zero size",
+            ));
+        }
+        if let Err(why) = fields_fit(&m.fields, m.size) {
+            return Err(String::from(&why));
+        }
+
+        Ok(())
+    }
+}
+
+impl RequestSignature {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        let s = self;
+        format!(
+            "`{}` requests carry a {:?} signature of {} in header `{}`, {:?} encoded.",
+            s.endpoint,
+            s.algorithm,
+            s.signed_input(),
+            s.header,
+            s.encoding
+        )
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        let s = self;
+        if let Err(why) = Endpoint::parse(&s.endpoint) {
+            return Err(String::from(why));
+        }
+        if s.header.is_empty() {
+            return Err(String::from("signature needs a header name"));
+        }
+        let empty = |p: &SignedPart| matches!(p, SignedPart::Header(t) | SignedPart::Text(t) if t.is_empty());
+        if s.signed.iter().any(empty) {
+            return Err(String::from("a signed header or text must not be empty"));
+        }
+
+        Ok(())
+    }
+}
+
+impl ResponseSchema {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        let r = self;
+        format!(
+            "{} responses to `{}` match {}.",
+            r.status,
+            r.endpoint,
+            schema_summary(&r.schema)
+        )
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        let r = self;
+        if let Err(why) = Endpoint::parse(&r.endpoint) {
+            return Err(String::from(why));
+        }
+        if !(100..600).contains(&r.status) || !(r.schema.is_object() || r.schema.is_boolean()) {
+            return Err(String::from(
+                "response schema needs a status of 100 to 599 and an object or boolean schema",
+            ));
+        }
+        if accepts_everything(&r.schema) {
+            return Err(String::from(
+                "this schema accepts every response, so nothing could refute it; say what a response must have",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 /// Structural checks that do not need evidence.
 ///
 /// # Errors
 /// `CoreError::Inadmissible` with the reason.
 pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
-    let bad = |m: &str| Err(CoreError::Inadmissible(m.to_owned()));
-    match &claim.kind {
-        ClaimKind::FieldRelation(r) => {
-            let integer = |f: &IntField| matches!(f.len, 1 | 2 | 4 | 8);
-            let summed = match &r.equals {
-                Relation::Sum { fields, .. } => !fields.is_empty() && fields.iter().all(integer),
-                Relation::BytesAfter { .. } | Relation::SnapshotLength => true,
-            };
-            if r.type_name.is_empty() || !integer(&r.field) || !summed {
-                return bad(
-                    "a field relation needs a type name, integers of 1, 2, 4 or 8 bytes, and at least one field to sum",
-                );
-            }
-        }
-        ClaimKind::RecordArray(r) => {
-            if r.type_name.is_empty() || r.stride == 0 || !matches!(r.count_len, 1 | 2 | 4 | 8) {
-                return bad(
-                    "a record array needs a type name, a count of 1, 2, 4 or 8 bytes and a record size",
-                );
-            }
-            if r.count_offset.saturating_add(r.count_len) > r.first {
-                return bad("the count must end before the first record starts");
-            }
-            if let Err(why) = fields_fit(&r.fields, r.stride) {
-                return bad(&why);
-            }
-        }
-        ClaimKind::StatusSet(s) => {
-            if let Err(why) = Endpoint::parse(&s.endpoint) {
-                return bad(why);
-            }
-            if s.statuses.is_empty() || !s.statuses.iter().all(|status| (100..600).contains(status))
-            {
-                return bad("a status claim needs at least one status, each from 100 to 599");
-            }
-        }
-        ClaimKind::RequestBodySchema(b) => {
-            if let Err(why) = Endpoint::parse(&b.endpoint) {
-                return bad(why);
-            }
-            if !(b.schema.is_object() || b.schema.is_boolean()) {
-                return bad("a request body claim needs an object or boolean schema");
-            }
-            if accepts_everything(&b.schema) {
-                return bad(
-                    "this schema accepts every body, so nothing could refute it; say what a body must have",
-                );
-            }
-        }
-        ClaimKind::RequestHeader(h) => {
-            if let Err(why) = Endpoint::parse(&h.endpoint) {
-                return bad(why);
-            }
-            if h.header.is_empty() || !(h.value.is_object() || h.value.is_boolean()) {
-                return bad(
-                    "a header claim needs a header name and an object or boolean schema for its value",
-                );
-            }
-        }
-        ClaimKind::MemoryLayout(m) => {
-            if m.type_name.is_empty() || m.size == 0 {
-                return bad("memory layout needs a type name and non-zero size");
-            }
-            if let Err(why) = fields_fit(&m.fields, m.size) {
-                return bad(&why);
-            }
-        }
-        ClaimKind::RequestSignature(s) => {
-            if let Err(why) = Endpoint::parse(&s.endpoint) {
-                return bad(why);
-            }
-            if s.header.is_empty() {
-                return bad("signature needs a header name");
-            }
-            let empty = |p: &SignedPart| matches!(p, SignedPart::Header(t) | SignedPart::Text(t) if t.is_empty());
-            if s.signed.iter().any(empty) {
-                return bad("a signed header or text must not be empty");
-            }
-        }
-        ClaimKind::ResponseSchema(r) => {
-            if let Err(why) = Endpoint::parse(&r.endpoint) {
-                return bad(why);
-            }
-            if !(100..600).contains(&r.status) || !(r.schema.is_object() || r.schema.is_boolean()) {
-                return bad(
-                    "response schema needs a status of 100 to 599 and an object or boolean schema",
-                );
-            }
-            if accepts_everything(&r.schema) {
-                return bad(
-                    "this schema accepts every response, so nothing could refute it; say what a response must have",
-                );
-            }
-        }
-    }
+    let admissible = match &claim.kind {
+        ClaimKind::TaggedRecords(c) => c.admissible(),
+        ClaimKind::FieldRelation(c) => c.admissible(),
+        ClaimKind::RecordArray(c) => c.admissible(),
+        ClaimKind::StatusSet(c) => c.admissible(),
+        ClaimKind::RequestBodySchema(c) => c.admissible(),
+        ClaimKind::RequestHeader(c) => c.admissible(),
+        ClaimKind::MemoryLayout(c) => c.admissible(),
+        ClaimKind::RequestSignature(c) => c.admissible(),
+        ClaimKind::ResponseSchema(c) => c.admissible(),
+    };
+    admissible.map_err(CoreError::Inadmissible)?;
     Ok(WellFormed(claim))
 }
 
@@ -1325,6 +1497,32 @@ mod tests {
         for schema in something {
             assert!(admit(claim(schema.clone())).is_ok(), "{schema}");
         }
+    }
+
+    #[test]
+    fn tagged_records_sentence_and_admission() {
+        let run = |count, tags: &[u64]| Claim {
+            kind: ClaimKind::TaggedRecords(TaggedRecords {
+                type_name: "GameHeader".into(),
+                start: 0,
+                size_len: 2,
+                tag_len: 2,
+                count,
+                tags: tags.iter().copied().collect(),
+            }),
+            premises: BTreeSet::new(),
+        };
+        insta::assert_snapshot!(
+            "tagged_records",
+            run(Some(3), &[2849, 892, 1920]).sentence()
+        );
+        insta::assert_snapshot!("tagged_records_open", run(None, &[]).sentence());
+        assert!(admit(run(None, &[])).is_ok());
+        assert!(admit(run(Some(0), &[])).is_err());
+        assert!(
+            admit(run(None, &[70_000])).is_err(),
+            "a tag wider than two bytes"
+        );
     }
 
     #[test]

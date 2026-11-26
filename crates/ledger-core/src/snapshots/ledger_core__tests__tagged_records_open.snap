@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "run(None, &[]).sentence()"
+---
+`GameHeader` is a run of records from +0x0, each a 2-byte size, a 2-byte tag and that many bytes of value: up to the end of the snapshot.
