@@ -92,5 +92,5 @@ From `cargo tree -p <crate> --depth 1`:
 ```bash
 cargo run -p ledger-mcp -- ledger.db   # MCP server on stdio
 cargo run -p ledger-cli -- ledger.db   # list claims with status
-scripts/ci.sh                          # fmt, clippy, nextest, doctests, deny, machete
+scripts/ci.sh                          # fmt, clippy (ledger-os also for Windows and macOS), nextest, doctests, deny, machete
 ```

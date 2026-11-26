@@ -7,6 +7,10 @@ run() { printf '\n==> %s\n' "$*"; "$@"; }
 
 run cargo fmt --all --check
 run cargo clippy --workspace --all-targets -- -D warnings
+# ledger-os picks the system's functions at compile time; the other systems must lint too.
+for target in x86_64-pc-windows-gnu aarch64-apple-darwin; do
+  run cargo clippy -p ledger-os --target "$target" -- -D warnings
+done
 run cargo nextest run --workspace
 run cargo test --workspace --doc
 run cargo deny check

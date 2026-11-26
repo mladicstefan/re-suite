@@ -18,7 +18,8 @@ target; all checks replay captures.
 - `crates/ledger-bench`: `cargo run --release -p ledger-bench` checks the ROADMAP.md budgets.
 
 ## Checks
-- Full CI: `scripts/ci.sh` (fmt, clippy -D warnings, nextest, doctests, cargo deny, cargo machete).
+- Full CI: `scripts/ci.sh` (fmt, clippy -D warnings, clippy of ledger-os for Windows and macOS, nextest, doctests, cargo deny, cargo machete).
+  The two extra targets come from `rustup target add x86_64-pc-windows-gnu aarch64-apple-darwin`.
 - Hooks in `.claude/settings.json` run `cargo check -p <crate>` after `.rs` edits and
   `scripts/ci.sh` before `git commit`; they also guard protected config, hand-written
   versions and uncommented `#[allow]`.
