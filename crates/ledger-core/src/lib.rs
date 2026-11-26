@@ -645,8 +645,9 @@ fn schema_summary(schema: &serde_json::Value) -> String {
 }
 
 /// Whether a JSON Schema accepts every value, so that no response could refute it:
-/// `true`, or an object with nothing but annotations and properties that
-/// themselves accept everything.
+/// `true`, or an object whose every keyword is an annotation or a constraint
+/// nothing can fail, such as `"required": []`. It errs towards "says something":
+/// a schema it does not see through is admitted.
 fn accepts_everything(schema: &serde_json::Value) -> bool {
     const ANNOTATIONS: [&str; 8] = [
         "$schema",
@@ -658,14 +659,30 @@ fn accepts_everything(schema: &serde_json::Value) -> bool {
         "examples",
         "deprecated",
     ];
+    // Every JSON type; `number` covers `integer`.
+    const TYPES: [&str; 6] = ["null", "boolean", "object", "array", "number", "string"];
+    use serde_json::Value as V;
+    // A keyword says nothing when it is an annotation, or a constraint written so
+    // that nothing can fail it.
+    let says_nothing = |(key, value): (&String, &V)| match (key.as_str(), value) {
+        ("properties" | "patternProperties", V::Object(named)) => {
+            named.values().all(accepts_everything)
+        }
+        ("items" | "additionalProperties" | "additionalItems" | "propertyNames", _) => {
+            accepts_everything(value)
+        }
+        ("required", V::Array(names)) => names.is_empty(),
+        ("minItems" | "minLength" | "minProperties", V::Number(least)) => least.as_u64() == Some(0),
+        ("uniqueItems", V::Bool(unique)) => !unique,
+        ("type", V::Array(types)) => TYPES.iter().all(|t| types.iter().any(|named| named == t)),
+        ("anyOf", V::Array(options)) => options.iter().any(accepts_everything),
+        ("allOf", V::Array(parts)) => parts.iter().all(accepts_everything),
+        ("not", V::Bool(false)) => true,
+        _ => ANNOTATIONS.contains(&key.as_str()),
+    };
     match schema {
-        serde_json::Value::Bool(accepts) => *accepts,
-        serde_json::Value::Object(keywords) => keywords.iter().all(|(key, value)| match value {
-            serde_json::Value::Object(properties) if key == "properties" => {
-                properties.values().all(accepts_everything)
-            }
-            _ => ANNOTATIONS.contains(&key.as_str()),
-        }),
+        V::Bool(accepts) => *accepts,
+        V::Object(keywords) => keywords.iter().all(says_nothing),
         _ => false,
     }
 }
@@ -1854,6 +1871,47 @@ mod tests {
         // so it matched requests with and without `a=1` alike.
         assert!(Endpoint::parse("GET /x?!a=1").is_err());
         assert!(Endpoint::parse("GET /x?a=1&!b").is_ok());
+    }
+
+    #[test]
+    fn schemas_that_say_nothing_are_refused_however_they_are_written() {
+        let admitted = |schema: serde_json::Value| {
+            admit(Claim {
+                kind: ClaimKind::ResponseSchema(ResponseSchema {
+                    endpoint: "GET /x".into(),
+                    status: 200,
+                    schema,
+                }),
+                premises: BTreeSet::new(),
+            })
+            .is_ok()
+        };
+        let all_types = [
+            "null", "boolean", "object", "array", "number", "string", "integer",
+        ];
+        for nothing in [
+            serde_json::json!({"required": []}),
+            serde_json::json!({"additionalProperties": true}),
+            serde_json::json!({"minItems": 0, "minLength": 0}),
+            serde_json::json!({"type": all_types}),
+            serde_json::json!({"anyOf": [{"required": ["id"]}, {}]}),
+            serde_json::json!({"allOf": [{}, true]}),
+            serde_json::json!({"not": false}),
+            serde_json::json!({"items": {}, "properties": {"id": {"required": []}}}),
+        ] {
+            assert!(!admitted(nothing.clone()), "{nothing} was admitted");
+        }
+        for something in [
+            serde_json::json!({"required": ["id"]}),
+            serde_json::json!({"additionalProperties": false}),
+            serde_json::json!({"minItems": 1}),
+            serde_json::json!({"type": ["object", "null"]}),
+            serde_json::json!({"anyOf": [{"required": ["id"]}, {"type": "null"}]}),
+            serde_json::json!({"not": {}}),
+            serde_json::json!({"items": {"type": "string"}}),
+        ] {
+            assert!(admitted(something.clone()), "{something} was refused");
+        }
     }
 
     #[test]
