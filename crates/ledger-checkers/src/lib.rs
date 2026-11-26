@@ -1051,7 +1051,13 @@ pub fn har_exchanges(bytes: &[u8]) -> Option<Vec<HttpExchange>> {
 /// The commands Rizin is run with, in the order [`rizin_facts`] reads their output:
 /// the file's format, its hashes, its imports, its relocations, then the analysis
 /// and the functions it found.
-pub const RIZIN_COMMANDS: &str = "iIj; iTj; iij; irj; aaa; aflj";
+///
+/// The plain `aaa` analysis left 7% to 59% of the code ranges in four programs' unwind
+/// tables in no function. Looking for a function after the end of each one found
+/// (`analysis.hasnext`) and scanning for function preludes (`aap`) brings that down to
+/// 0% to 12%, and Rizin's calls still agree with a second disassembler in over 99.7%
+/// of the functions that can be compared (`docs/trials/rzil-coverage.md`).
+pub const RIZIN_COMMANDS: &str = "iIj; iTj; iij; irj; e analysis.hasnext=true; aaa; aap; aflj";
 
 /// What Rizin printed, one value per command.
 struct RizinExport {
@@ -2199,7 +2205,7 @@ mod tests {
                 {"from":9380,"to":40900,"type":"CODE"}]},
             {"offset":9616,"name":"fcn.00002590","callrefs":[]}]"#;
         let facts = rizin_facts("rizin 0.9.1", output)?;
-        assert_eq!(facts.tool, "rizin 0.9.1 (iIj; iTj; iij; irj; aaa; aflj)");
+        assert_eq!(facts.tool, format!("rizin 0.9.1 ({RIZIN_COMMANDS})"));
         // Only imports that are called are kept.
         assert_eq!(
             facts.imports.iter().collect::<Vec<_>>(),
