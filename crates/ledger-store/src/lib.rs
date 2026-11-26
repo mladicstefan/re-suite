@@ -147,7 +147,7 @@ impl Store {
         ))?;
         let objects = "SELECT count(*) FROM sqlite_master";
         if conn.query_one(objects, [], |r| r.get::<_, i64>(0))? == 0 {
-            conn.execute_batch(SCHEMA)?;
+            atomically(&conn, SCHEMA)?;
         }
         // Each migration is one transaction, so a crash leaves a whole version either way.
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -155,7 +155,7 @@ impl Store {
             .unwrap_or(usize::MAX)
             .saturating_sub(1);
         for migration in MIGRATIONS.iter().skip(done).filter(|_| version >= 1) {
-            conn.execute_batch(&format!("BEGIN;{migration}COMMIT;"))?;
+            atomically(&conn, migration)?;
         }
         let live = Arc::new(load(&conn)?);
         let evidence_dir = sidecar(path, ".evidence");
@@ -344,6 +344,13 @@ impl Drop for Store {
             tracing::error!("ledger writer panicked");
         }
     }
+}
+
+/// Runs `sql` as one transaction, so a crash or a failing statement leaves none of it.
+fn atomically(conn: &Connection, sql: &str) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(sql)?;
+    tx.commit()
 }
 
 /// `<db><suffix>`, next to the ledger file like SQLite's own `-wal`.
@@ -684,6 +691,21 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].0, id.as_str());
         assert_eq!(listed[0].1.status, Some(200));
+        Ok(())
+    }
+
+    #[test]
+    fn a_schema_cut_short_leaves_nothing_behind() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("l.db");
+        // As if the process died before the schema's last statement: here, one that fails.
+        let cut = SCHEMA.replace("PRAGMA", "CREATE TABLE events (seq); PRAGMA");
+        assert!(atomically(&Connection::open(&db)?, &cut).is_err());
+        let objects = "SELECT count(*) FROM sqlite_master";
+        let conn = Connection::open(&db)?;
+        assert_eq!(conn.query_one(objects, [], |r| r.get::<_, i64>(0))?, 0);
+        // The file still reads as new, so the next open creates the whole schema.
+        assert_eq!(Store::open(&db)?.snapshot().seq, 0);
         Ok(())
     }
 
