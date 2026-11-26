@@ -357,6 +357,10 @@ pub fn propose(store: &Store, mut claim: Claim, evidence: &[String]) -> Result<S
     let claim = admit(claim).map_err(StoreError::Core)?;
     let id = claim.get().id().map_err(StoreError::Core)?;
     let kind = claim.get().kind.clone();
+    // What the check needs is taken now and the snapshot let go: while a reader still
+    // holds an old snapshot, every write has to copy the whole ledger.
+    let kinds: Vec<_> = evidence.iter().map(|e| ledger.evidence_kind(e)).collect();
+    drop(before);
     tracing::info!(claim = %id, "proposing");
     store.append(Event::Proposed { claim })?;
 
@@ -371,14 +375,13 @@ pub fn propose(store: &Store, mut claim: Claim, evidence: &[String]) -> Result<S
         // finds the first one's verdict recorded.
         let turn = Turn::at(&id, &read, &checker);
         let _mine = turn.gate.lock().unwrap_or_else(PoisonError::into_inner);
-        let recorded = store.snapshot();
-        let known = recorded.ledger.checked(&id, &read, &checker);
-        reused = known.is_some_and(|v| !matches!(v, Verdict::Inconclusive { .. }));
+        reused = (store.snapshot().ledger.checked(&id, &read, &checker))
+            .is_some_and(|v| !matches!(v, Verdict::Inconclusive { .. }));
         if !reused {
             let mut mapped = Vec::with_capacity(evidence.len());
-            for e in &evidence {
+            for (e, kind) in evidence.iter().zip(&kinds) {
                 let unknown = || unknown_evidence(e.as_str());
-                let kind = ledger.evidence_kind(e).ok_or_else(unknown)?;
+                let kind = kind.ok_or_else(unknown)?;
                 mapped.push((e.clone(), kind, store.evidence(e)?.ok_or_else(unknown)?));
             }
             let raw: Vec<_> = (mapped.iter())
@@ -756,7 +759,8 @@ pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<Str
         let body = format!("evidence {}", short(id.as_str()));
         return Ok(stamp(&store.snapshot(), &body));
     };
-    let before = store.snapshot();
+    // Only the number: a snapshot held across the writes would make each one copy the ledger.
+    let before = store.snapshot().seq;
     let total = exchanges.len();
     for exchange in exchanges {
         let exchange =
@@ -765,7 +769,7 @@ pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<Str
     }
     // Each new piece of evidence is one event; repeats inside the file and re-imports add none.
     let after = store.snapshot();
-    let new = after.seq - before.seq;
+    let new = after.seq - before;
     let body = format!(
         "imported {total} exchanges from the HAR file, {new} of them new\n\
          list the ones for an endpoint with ask about=evidence subject=`METHOD host/path`"
@@ -1296,6 +1300,45 @@ mod tests {
         retract(&store, &ghost, "gone".into()).map_err(|r| r.to_string())?;
         let out = retract(&store, &player, "wrong build".into()).map_err(|r| r.to_string())?;
         assert!(out.ends_with("dependents now on hold: 1"), "{out}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_check_holds_no_snapshot_the_writer_would_copy() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let file = dir.path().join("player.bin");
+        std::fs::write(&file, [0u8; 32])?;
+        let path = file.to_str().ok_or("path")?;
+        let added =
+            add_evidence(&store, EvidenceKind::MemorySnapshot, path).map_err(|r| r.to_string())?;
+        let evidence = [added.rsplit(' ').next().unwrap_or_default().to_owned()];
+        let claim = layout("Player", 32, &[])?;
+        let id = claim.id()?;
+        let read: BTreeSet<EvidenceId> = (store.snapshot().ledger)
+            .evidence_starting(&evidence[0])
+            .cloned()
+            .collect();
+        // Taking this check's place in line stops propose just before it checks.
+        let turn = Turn::at(&id, &read, &checker_of(&claim.kind));
+        let gate = turn.gate.lock().unwrap_or_else(PoisonError::into_inner);
+        let start = Arc::downgrade(&store.snapshot());
+        let (held, proposed) = std::thread::scope(|s| {
+            let proposing = s.spawn(|| propose(&store, claim, &evidence));
+            // The table, this turn and propose's turn.
+            while Arc::strong_count(&turn.gate) < 3 && !proposing.is_finished() {
+                std::thread::yield_now();
+            }
+            let held = start.strong_count();
+            drop(gate);
+            (held, proposing.join().map_err(|_| "propose panicked"))
+        });
+        assert!(proposed?.map_err(|r| r.to_string())?.contains("held"));
+        // The store keeps the snapshot propose started from as its spare; nothing else may.
+        assert!(
+            held <= 1,
+            "{held} holders of the snapshot propose started from"
+        );
         Ok(())
     }
 
