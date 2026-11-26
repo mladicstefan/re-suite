@@ -368,7 +368,7 @@ the ledger changes no status, and the write and read budgets hold.
 - [x] **Hardening.** Cache each check on what it read; grow to 8-10 claim
       kinds; counterexample shrinking; checks against vacuous or weakened
       claims
-- [ ] **Version reruns.** Rerun the whole ledger on a new build, with
+- [x] **Version reruns.** Rerun the whole ledger on a new build, with
       anchors that survive rebuilds and a status diff
 - [ ] **Live captures.** Snapshots of a running process, taken only with
       human approval, that carry what the human observed at capture time
@@ -505,7 +505,7 @@ honestly.
 | Question | Answer by |
 | --- | --- |
 | Does the loop cut tokens and false claims on real RE tasks? | End of Phase 1 |
-| Which anchor survives real version changes with the fewest false matches? | Phase 2, version reruns |
+| A rerun ties a web claim to its endpoint and a snapshot claim to its type name, and suggests a move from a bounded search (`docs/trials/version-rerun.md`). That was tried on a simulated pair of builds only. Which anchor survives real version changes with the fewest false matches? | The first real pair of target versions |
 | How much of x86-64 and AArch64 does RzIL lift, and how often does it disagree with a second lifter? | End of Phase 2 |
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
 | How far does VerifiedIDA's standard overlap, and should we build on it or interoperate? | Before the open format in Phase 6 |
