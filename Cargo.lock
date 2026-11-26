@@ -954,6 +954,7 @@ dependencies = [
  "ledger-core",
  "ledger-store",
  "rusqlite",
+ "tempfile",
 ]
 
 [[package]]

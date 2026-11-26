@@ -1,6 +1,6 @@
 //! Reproduces the baseline table in ROADMAP.md section 6 and checks its budgets.
 //!
-//! `cargo run --release -p ledger-bench [-- <scratch dir on the disk to measure>]`
+//! `cargo run --release -p ledger-bench [-- <new or empty dir on the disk to measure>]`
 //! Prints a Markdown table and exits non-zero if a budget is broken.
 
 use std::error::Error;
@@ -279,18 +279,48 @@ fn main() -> Res {
         .nth(1)
         .unwrap_or_else(|| "target/ledger-bench".into());
     let dir = Path::new(&dir);
-    if dir.exists() {
-        std::fs::remove_dir_all(dir)?;
-    }
-    std::fs::create_dir_all(dir)?;
+    let created = prepare(dir)?;
     let mut report = Report { broken: false };
     println!("| Scenario | Result | Budget |\n| --- | --- | --- |");
     let ids = core_rows(&mut report)?;
     storage_rows(&mut report, dir, &ids)?;
     interactive_rows(&mut report, dir, &ids[..MEDIUM])?;
-    std::fs::remove_dir_all(dir)?;
+    clean(dir, created)?;
     if report.broken {
         return Err("a budget is broken".into());
+    }
+    Ok(())
+}
+
+/// Makes `dir` ready for the run, or refuses it if it holds anything: none of that
+/// would be the run's to delete. Returns whether the run created `dir`.
+fn prepare(dir: &Path) -> Res<bool> {
+    if !dir.exists() {
+        std::fs::create_dir_all(dir)?;
+        return Ok(true);
+    }
+    if std::fs::read_dir(dir)?.next().is_some() {
+        return Err(format!(
+            "{} is not empty; give a new or empty directory",
+            dir.display()
+        )
+        .into());
+    }
+    Ok(false)
+}
+
+/// Removes what the run put in `dir`, and `dir` itself if the run created it.
+fn clean(dir: &Path, created: bool) -> Res {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    if created {
+        std::fs::remove_dir(dir)?;
     }
     Ok(())
 }
@@ -457,4 +487,34 @@ fn interactive_rows(report: &mut Report, dir: &Path, ids: &[ClaimId]) -> Res {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_scratch_directory_is_left_as_it_was() -> Res {
+        let parent = tempfile::tempdir()?;
+        // What is in the directory already is never the run's to delete.
+        let full = parent.path().join("full");
+        std::fs::create_dir(&full)?;
+        std::fs::write(full.join("keep"), b"")?;
+        assert!(prepare(&full).is_err());
+        assert!(full.join("keep").exists());
+        // An empty directory is emptied again, and one the run made is removed.
+        let empty = parent.path().join("empty");
+        std::fs::create_dir(&empty)?;
+        for (dir, kept) in [(empty, true), (parent.path().join("new"), false)] {
+            let created = prepare(&dir)?;
+            std::fs::write(dir.join("large.db"), b"")?;
+            std::fs::create_dir(dir.join("large.db.evidence"))?;
+            clean(&dir, created)?;
+            assert_eq!(dir.exists(), kept);
+            if kept {
+                assert_eq!(std::fs::read_dir(&dir)?.count(), 0);
+            }
+        }
+        Ok(())
+    }
 }
