@@ -745,13 +745,25 @@ pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<Str
 /// # Errors
 /// The id names no claim or more than one.
 pub fn retract(store: &Store, claim: &str, reason: String) -> Result<String, Rejection> {
-    let id = find_claim(&store.snapshot().ledger, claim)?;
+    // Dependents not on hold yet. The snapshot is let go before the write, which would
+    // otherwise have to copy the ledger it still shares.
+    let (id, free) = {
+        let ledger = &store.snapshot().ledger;
+        let id = find_claim(ledger, claim)?;
+        let free: Vec<ClaimId> = (ledger.dependents(&id).into_iter())
+            .filter(|d| ledger.status(d) != Some(Status::Blocked))
+            .cloned()
+            .collect();
+        (id, free)
+    };
     store.append(Event::Retracted {
         claim: id.clone(),
         reason,
     })?;
     let after = store.snapshot();
-    let on_hold = after.ledger.dependents(&id).len();
+    let on_hold = (free.iter())
+        .filter(|d| after.ledger.status(d) == Some(Status::Blocked))
+        .count();
     let body = format!(
         "{}\ndependents now on hold: {on_hold}",
         row_of(&after.ledger, &id)
@@ -1211,6 +1223,34 @@ mod tests {
         let held = explained.lines().filter(|l| l.starts_with("held on"));
         assert_eq!(held.count(), LISTED);
         assert!(!explained.contains("not shown"), "{explained}");
+        Ok(())
+    }
+
+    #[test]
+    fn retracting_counts_only_the_claims_it_puts_on_hold() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let file = dir.path().join("player.bin");
+        std::fs::write(&file, [0u8; 32])?;
+        let path = file.to_str().ok_or("path")?;
+        let added =
+            add_evidence(&store, EvidenceKind::MemorySnapshot, path).map_err(|r| r.to_string())?;
+        let snapshot = [added.rsplit(' ').next().unwrap_or_default().to_owned()];
+        let filed = |claim, evidence: &[String]| -> Result<String, Box<dyn std::error::Error>> {
+            let out = propose(&store, claim, evidence).map_err(|r| r.to_string())?;
+            Ok(id_in(&out).to_owned())
+        };
+        let player = filed(layout("Player", 32, &[])?, &snapshot)?;
+        let map = filed(layout("Map", 8, &[])?, &[])?;
+        // Four claims rest on Player. Only Pet goes on hold: Boss is refuted, Minion
+        // waits on Map already and Ghost is retracted.
+        filed(layout("Pet", 8, &[&player])?, &[])?;
+        filed(layout("Boss", 64, &[&player])?, &snapshot)?;
+        filed(layout("Minion", 8, &[&player, &map])?, &[])?;
+        let ghost = filed(layout("Ghost", 8, &[&player])?, &[])?;
+        retract(&store, &ghost, "gone".into()).map_err(|r| r.to_string())?;
+        let out = retract(&store, &player, "wrong build".into()).map_err(|r| r.to_string())?;
+        assert!(out.ends_with("dependents now on hold: 1"), "{out}");
         Ok(())
     }
 
