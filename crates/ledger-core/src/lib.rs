@@ -562,6 +562,12 @@ impl Claim {
     /// subject and do differ. Premises are not compared.
     #[must_use]
     pub fn revision_of(&self, earlier: &Self) -> Option<Revision> {
+        // The cheap tests first: this runs against every refuted claim in the ledger.
+        if std::mem::discriminant(&self.kind) != std::mem::discriminant(&earlier.kind)
+            || self.subject() != earlier.subject()
+        {
+            return None;
+        }
         let (now, was) = (
             serde_json::to_value(&self.kind).ok()?,
             serde_json::to_value(&earlier.kind).ok()?,
@@ -571,10 +577,7 @@ impl Claim {
         let topic = |kind: &serde_json::Value| {
             ["header", "status", "caller", "callee"].map(|part| kind.get(part).cloned())
         };
-        if now.get("kind") != was.get("kind")
-            || self.subject() != earlier.subject()
-            || topic(&now) != topic(&was)
-        {
+        if topic(&now) != topic(&was) {
             return None;
         }
         let mut revision = Revision::default();
