@@ -81,6 +81,7 @@ fn main() -> anyhow::Result<()> {
         let (outcome, detail) = match row.outcome {
             Outcome::Holds { runs } => ("holds", format!("on {runs} captures")),
             Outcome::Failed { detail } => ("failed", detail),
+            Outcome::Moved { to, runs } => ("moved", format!("{to}, on {runs} captures")),
             Outcome::NoEvidence => (
                 "no evidence",
                 "the new build has no capture this claim is about".to_owned(),

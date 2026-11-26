@@ -5,11 +5,12 @@
 //! endpoint and a claim about snapshots to its type name; that is how the captures
 //! of the new build are matched to it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use ledger_core::{
-    Claim, ClaimId, ClaimKind, EvidenceId, EvidenceKind, HttpExchange, Ledger, Status, Verdict,
+    Claim, ClaimId, ClaimKind, Endpoint, EvidenceId, EvidenceKind, HttpExchange, Ledger, Status,
+    Verdict, admit, url_host_and_path,
 };
 
 use crate::{Raw, check_claim, is_about};
@@ -92,6 +93,151 @@ fn claim_subject(kind: &ClaimKind) -> &str {
     }
 }
 
+/// The furthest a layout's fields are looked for from where the claim puts them.
+const MAX_SHIFT: i64 = 64;
+/// The most literal path segments, or host, that may differ for an endpoint to count as moved.
+const MAX_SEGMENTS_CHANGED: usize = 2;
+
+/// Whether `kind` is admissible and holds on `evidence`; the number of runs if so.
+fn holds(id: &ClaimId, kind: &ClaimKind, evidence: &[Raw<'_>], limit: Duration) -> Option<u64> {
+    let claim = Claim {
+        kind: kind.clone(),
+        premises: BTreeSet::new(),
+    };
+    admit(claim).ok()?;
+    match check_claim(id, kind, evidence, limit) {
+        Ok(Verdict::Held { runs }) => Some(runs.get()),
+        _ => None,
+    }
+}
+
+/// A layout that failed may only have had bytes added or removed in the middle: looks
+/// for one offset from which every field sits the same distance away, on all snapshots.
+/// At least two typed fields must move together, since one alone fits by accident.
+fn shifted_layout(
+    id: &ClaimId,
+    kind: &ClaimKind,
+    evidence: &[Raw<'_>],
+    limit: Duration,
+) -> Option<Outcome> {
+    let ClaimKind::MemoryLayout(layout) = kind else {
+        return None;
+    };
+    let mut starts: Vec<u64> = layout.fields.iter().map(|f| f.offset).collect();
+    starts.sort_unstable();
+    starts.dedup();
+    let mut fits = Vec::new();
+    for from in starts {
+        let typed = |f: &&ledger_core::FieldLayout| f.offset >= from && f.is.is_some();
+        if layout.fields.iter().filter(typed).count() < 2 {
+            continue;
+        }
+        for delta in (-MAX_SHIFT..=MAX_SHIFT).filter(|delta| *delta != 0) {
+            let mut shifted = layout.clone();
+            let moved = (shifted.fields.iter_mut().filter(|f| f.offset >= from))
+                .try_for_each(|f| f.offset.checked_add_signed(delta).map(|at| f.offset = at));
+            let Some(size) = moved.and_then(|()| shifted.size.checked_add_signed(delta)) else {
+                continue;
+            };
+            shifted.size = size;
+            if let Some(runs) = holds(id, &ClaimKind::MemoryLayout(shifted), evidence, limit) {
+                fits.push((delta.unsigned_abs(), from, delta, size, runs));
+            }
+        }
+    }
+    fits.sort_unstable();
+    let (distance, from, delta, size, runs) = *fits.first()?;
+    let direction = if delta > 0 { "later" } else { "earlier" };
+    let others = match fits.len() - 1 {
+        0 => String::new(),
+        n => format!("; {n} other shifts also fit"),
+    };
+    Some(Outcome::Moved {
+        to: format!(
+            "the fields from +{from:#x} on are {distance} bytes {direction}, and the type is {size} bytes{others}"
+        ),
+        runs,
+    })
+}
+
+/// The same web claim under another endpoint.
+fn with_endpoint(kind: &ClaimKind, endpoint: String) -> Option<ClaimKind> {
+    let mut kind = kind.clone();
+    match &mut kind {
+        ClaimKind::RequestSignature(c) => c.endpoint = endpoint,
+        ClaimKind::RequestHeader(c) => c.endpoint = endpoint,
+        ClaimKind::RequestBodySchema(c) => c.endpoint = endpoint,
+        ClaimKind::ResponseSchema(c) => c.endpoint = endpoint,
+        ClaimKind::StatusSet(c) => c.endpoint = endpoint,
+        _ => return None,
+    }
+    Some(kind)
+}
+
+/// A web claim with no captures may have had its endpoint renamed: looks for an
+/// endpoint in the new build that differs in at most a couple of path segments or
+/// the host, and on whose captures the claim holds.
+fn moved_endpoint(
+    id: &ClaimId,
+    kind: &ClaimKind,
+    build: &Build,
+    limit: Duration,
+) -> Option<Outcome> {
+    let written = claim_subject(kind);
+    let (method, host, path, conditions) = Endpoint::parse(written).ok()?.parts();
+    let template: Vec<&str> = path.split('/').collect();
+    let mut candidates: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, _, exchange) in &build.exchanges {
+        let (seen_host, seen_path) = url_host_and_path(&exchange.request.url);
+        let seen: Vec<&str> = seen_path.split('/').collect();
+        if !exchange.request.method.eq_ignore_ascii_case(method) || seen.len() != template.len() {
+            continue;
+        }
+        // Variable segments stay variable; literal ones take what the new build has.
+        let variable = |segment: &str| segment.starts_with('{') && segment.ends_with('}');
+        let segments = template.iter().zip(&seen);
+        let renamed: Vec<&str> = (segments.clone())
+            .map(|(t, s)| if variable(t) { *t } else { *s })
+            .collect();
+        let host_changed = host.is_some_and(|h| !h.eq_ignore_ascii_case(seen_host));
+        let changed =
+            segments.filter(|(t, s)| !variable(t) && t != s).count() + usize::from(host_changed);
+        if (1..=MAX_SEGMENTS_CHANGED).contains(&changed) {
+            let host = host.map_or("", |_| seen_host);
+            let query = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!("?{conditions}")
+            };
+            candidates.insert(
+                format!("{method} {host}{}{query}", renamed.join("/")),
+                changed,
+            );
+        }
+    }
+    let mut fits = Vec::new();
+    for (endpoint, changed) in candidates {
+        let Some(renamed) = with_endpoint(kind, endpoint.clone()) else {
+            continue;
+        };
+        let evidence = build.evidence_for(&renamed);
+        let runs = (!evidence.is_empty()).then(|| holds(id, &renamed, &evidence, limit));
+        if let Some(runs) = runs.flatten() {
+            fits.push((changed, endpoint, runs));
+        }
+    }
+    fits.sort();
+    let (_, endpoint, runs) = fits.first()?.clone();
+    let others = match fits.len() - 1 {
+        0 => String::new(),
+        n => format!("; {n} other endpoints also fit"),
+    };
+    Some(Outcome::Moved {
+        to: format!("it holds for `{endpoint}`{others}"),
+        runs,
+    })
+}
+
 /// What became of one held claim in the new build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -99,6 +245,10 @@ pub enum Outcome {
     Holds { runs: u64 },
     /// A capture of the new build contradicts it.
     Failed { detail: String },
+    /// It no longer holds as written, or has no captures, but the same claim holds
+    /// somewhere near: at shifted offsets or under another endpoint. `to` says where.
+    /// This is a suggestion for a new claim; nothing is filed.
+    Moved { to: String, runs: u64 },
     /// The new build has no capture the claim is about.
     NoEvidence,
     /// The check could not finish or could not run; the reason says why.
@@ -122,13 +272,16 @@ pub fn rerun<'l>(ledger: &'l Ledger, build: &Build, limit: Duration) -> Vec<Row<
     held.map(|((id, claim), _)| {
         let evidence = build.evidence_for(&claim.kind);
         let outcome = if evidence.is_empty() {
-            Outcome::NoEvidence
+            moved_endpoint(id, &claim.kind, build, limit).unwrap_or(Outcome::NoEvidence)
         } else {
             match check_claim(id, &claim.kind, &evidence, limit) {
                 Ok(Verdict::Held { runs }) => Outcome::Holds { runs: runs.get() },
-                Ok(Verdict::Refuted { counterexample }) => Outcome::Failed {
-                    detail: counterexample.detail,
-                },
+                Ok(Verdict::Refuted { counterexample }) => {
+                    let failed = Outcome::Failed {
+                        detail: counterexample.detail,
+                    };
+                    shifted_layout(id, &claim.kind, &evidence, limit).unwrap_or(failed)
+                }
                 Ok(Verdict::Inconclusive { reason }) => Outcome::Unknown { reason },
                 Err(e) => Outcome::Unknown {
                     reason: e.to_string(),
@@ -145,9 +298,8 @@ mod tests {
     use super::*;
     use ledger_core::{
         CoreError, Event, FieldKind, FieldLayout, HttpRequest, HttpResponse, MemoryLayout,
-        ResponseSchema, admit,
+        ResponseSchema,
     };
-    use std::collections::BTreeSet;
     use std::num::NonZeroU64;
 
     fn exchange(url: &str, status: u16, body: &serde_json::Value) -> HttpExchange {
@@ -279,6 +431,117 @@ mod tests {
         assert_eq!(outcome(&shop), Some(Outcome::NoEvidence));
         assert_eq!(outcome(&save), Some(Outcome::Holds { runs: 1 }));
         assert_eq!(outcome(&unchecked), None, "only held claims are rerun");
+        Ok(())
+    }
+
+    /// A record with a magic, a version and a level, as it is laid out in one build.
+    fn record(pad: usize, level: u32) -> Vec<u8> {
+        let mut bytes = b"SAVE".to_vec();
+        bytes.extend(vec![0u8; pad]);
+        bytes.extend(7u32.to_le_bytes());
+        bytes.extend(level.to_le_bytes());
+        bytes
+    }
+
+    fn record_layout(typed_after_magic: usize) -> ClaimKind {
+        let field = |name: &str, offset, is| FieldLayout {
+            name: name.into(),
+            offset,
+            len: 4,
+            is,
+        };
+        let version = Some(FieldKind::Uint { min: 7, max: 7 });
+        let level = Some(FieldKind::Uint { min: 1, max: 99 });
+        ClaimKind::MemoryLayout(MemoryLayout {
+            type_name: "Record".into(),
+            size: 12,
+            fields: vec![
+                field("magic", 0, Some(FieldKind::Bytes(hex::encode("SAVE")))),
+                field("version", 4, version),
+                field(
+                    "level",
+                    8,
+                    if typed_after_magic == 2 { level } else { None },
+                ),
+            ],
+        })
+    }
+
+    #[test]
+    fn a_layout_with_bytes_inserted_is_reported_as_moved() -> Result<(), CoreError> {
+        let mut ledger = Ledger::default();
+        let both = file(&mut ledger, record_layout(2), true)?;
+        let one = file(&mut ledger, record_layout(1), true)?;
+        // The new build puts 8 bytes between the magic and the version.
+        let mut build = Build::default();
+        build.add_snapshot("Record", record(8, 12));
+        build.add_snapshot("Record", record(8, 40));
+        let rows = rerun(&ledger, &build, Duration::from_secs(5));
+        let outcome = |id: &ClaimId| {
+            rows.iter()
+                .find(|row| row.id == id)
+                .map(|row| row.outcome.clone())
+        };
+        assert_eq!(
+            outcome(&both),
+            Some(Outcome::Moved {
+                to: "the fields from +0x4 on are 8 bytes later, and the type is 20 bytes".into(),
+                runs: 2,
+            })
+        );
+        // With a single typed field after the gap, a shift would fit by accident: it stays failed.
+        assert!(matches!(outcome(&one), Some(Outcome::Failed { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn a_renamed_endpoint_is_reported_as_moved() -> Result<(), CoreError> {
+        let mut ledger = Ledger::default();
+        let ranked = serde_json::json!({"required": ["rank"]});
+        let stocked = serde_json::json!({"required": ["items"]});
+        let score = file(
+            &mut ledger,
+            schema("GET game.example/api/v1/score/{player}", ranked),
+            true,
+        )?;
+        let shop = file(
+            &mut ledger,
+            schema("GET game.example/api/v1/shop", stocked),
+            true,
+        )?;
+        let mut build = Build::default();
+        build.add_exchanges([
+            exchange(
+                "https://game.example/api/v2/score/7",
+                200,
+                &serde_json::json!({"rank": 3}),
+            ),
+            exchange(
+                "https://game.example/api/v2/score/8",
+                200,
+                &serde_json::json!({"rank": 9}),
+            ),
+            exchange(
+                "https://game.example/api/v2/news/8",
+                200,
+                &serde_json::json!({"title": "patch"}),
+            ),
+        ]);
+        let rows = rerun(&ledger, &build, Duration::from_secs(5));
+        let outcome = |id: &ClaimId| {
+            rows.iter()
+                .find(|row| row.id == id)
+                .map(|row| row.outcome.clone())
+        };
+        assert_eq!(
+            outcome(&score),
+            Some(Outcome::Moved {
+                to: "it holds for `GET game.example/api/v2/score/{player}`".into(),
+                runs: 2,
+            })
+        );
+        // Nothing in the new build looks like the shop, so there is nothing to suggest.
+        assert_eq!(outcome(&shop), Some(Outcome::NoEvidence));
         Ok(())
     }
 }

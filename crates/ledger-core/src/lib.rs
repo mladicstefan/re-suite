@@ -1001,6 +1001,18 @@ pub struct Endpoint<'a> {
     conditions: &'a str,
 }
 
+/// A request URL's host and path, without scheme, query or fragment. A URL with
+/// no scheme, as a server-side capture has, has no host; an empty path is `/`.
+#[must_use]
+pub fn url_host_and_path(url: &str) -> (&str, &str) {
+    let (host, path) = match url.split_once("://") {
+        Some((_, rest)) => rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len())),
+        None => ("", url),
+    };
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    (host, if path.is_empty() { "/" } else { path })
+}
+
 /// Decodes `%XX` escapes; anything else, including a lone `%`, is kept as it is.
 fn percent_decode(text: &str) -> String {
     let hex = |b: u8| {
@@ -1064,16 +1076,18 @@ impl<'a> Endpoint<'a> {
         })
     }
 
+    /// The endpoint as written: its method, its host if it names one, its path and
+    /// its query conditions.
+    #[must_use]
+    pub const fn parts(&self) -> (&'a str, Option<&'a str>, &'a str, &'a str) {
+        (self.method, self.host, self.path, self.conditions)
+    }
+
     /// Whether a captured request has this endpoint's method, host and path,
     /// whatever its query string.
     #[must_use]
     pub fn matches_path(&self, method: &str, url: &str) -> bool {
-        let (host, path) = match url.split_once("://") {
-            Some((_, rest)) => rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len())),
-            None => ("", url),
-        };
-        let path = path.split(['?', '#']).next().unwrap_or_default();
-        let path = if path.is_empty() { "/" } else { path };
+        let (host, path) = url_host_and_path(url);
         let segments = |p: &'a str| p.split('/');
         method.eq_ignore_ascii_case(self.method)
             && self.host.is_none_or(|h| h.eq_ignore_ascii_case(host))
