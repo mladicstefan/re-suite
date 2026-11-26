@@ -491,6 +491,7 @@ honestly.
 | 1, Half-Life saves (`docs/trials/half-life-saves.md`) | 20 of 21 | 1.17, about 440 tokens of tool traffic | 0 of 2 |
 | 2, web traffic (`docs/trials/web-api.md`) | 19 of 19 | 1.67, about 500 tokens of tool traffic | 1 of 1 |
 | 3, real websites (`docs/trials/real-sites.md`) | 14 of 15; the one that held is true of the captures | 2.0, about 600 tokens of tool traffic | not measured |
+| 5, the staging site (`docs/trials/staging-site.md`) | 8 of 8 | 1.36, about 120 tokens of tool traffic | none staged |
 
 ## 12. Not goals
 
@@ -508,6 +509,7 @@ honestly.
 | A rerun ties a web claim to its endpoint and a snapshot claim to its type name, and suggests a move from a bounded search (`docs/trials/version-rerun.md`). That was tried on a simulated pair of builds only. Which anchor survives real version changes with the fewest false matches? | The first real pair of target versions |
 | How much of x86-64 and AArch64 does RzIL lift, and how often does it disagree with a second lifter? | End of Phase 2 |
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
+| A web claim covers an endpoint and a status, not a content type, so `GET /{page}` cannot mean "pages, not files". And no claim kind speaks about a page load as a whole (which hosts it contacts) or reads HTML. Which of these should become claims? | Phase 2, formats |
 | How far does VerifiedIDA's standard overlap, and should we build on it or interoperate? | Before the open format in Phase 6 |
 
 ## 14. Rules for whoever implements a milestone
