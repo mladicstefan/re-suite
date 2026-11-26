@@ -374,8 +374,10 @@ the ledger changes no status, and the write and read budgets hold.
       human approval, that carry what the human observed at capture time
       (the HUD showed 73 HP); a layout claim must decode to those values
 - [ ] **Formats.** File and protocol claims through Kaitai Struct
-- [ ] **First binary claims.** Facts exported from Rizin; structural
-      claims checked "within the recovered code", assumptions listed
+- [x] **First binary claims.** Facts exported from Rizin; structural
+      claims checked "within the recovered code", assumptions listed.
+      One claim kind so far, a direct call between two functions
+      (`docs/trials/crash-handler.md`)
 - [ ] **Measure RzIL coverage** on our own targets
 
 Done when all five target types have at least one checked claim kind, and
@@ -492,6 +494,7 @@ honestly.
 | 2, web traffic (`docs/trials/web-api.md`) | 19 of 19 | 1.67, about 500 tokens of tool traffic | 1 of 1 |
 | 3, real websites (`docs/trials/real-sites.md`) | 14 of 15; the one that held is true of the captures | 2.0, about 600 tokens of tool traffic | not measured |
 | 5, the staging site (`docs/trials/staging-site.md`) | 8 of 8 | 1.36, about 120 tokens of tool traffic | none staged |
+| 6, a binary (`docs/trials/crash-handler.md`) | 3 of 3 | 1.63, about 270 tokens of tool traffic | none staged |
 
 ## 12. Not goals
 
@@ -510,6 +513,8 @@ honestly.
 | How much of x86-64 and AArch64 does RzIL lift, and how often does it disagree with a second lifter? | End of Phase 2 |
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
 | A web claim covers an endpoint and a status, not a content type, so `GET /{page}` cannot mean "pages, not files". And no claim kind speaks about a page load as a whole (which hosts it contacts) or reads HTML. Which of these should become claims? | Phase 2, formats |
+| Rizin left 27% of one program's code ranges in no function, and a claim can only be about a function the tool found (`docs/trials/crash-handler.md`). Should the export take function starts from a second source, such as the exception table? And should "held on N" need two tools to agree? | With the RzIL coverage measurement |
+| Without symbols a function's name is its address. What ties a binary claim to the same function in the next build? | The first real pair of target versions |
 | How far does VerifiedIDA's standard overlap, and should we build on it or interoperate? | Before the open format in Phase 6 |
 
 ## 14. Rules for whoever implements a milestone
