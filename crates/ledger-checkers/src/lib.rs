@@ -1107,8 +1107,8 @@ struct RizinReloc {
 }
 
 /// The functions and direct calls in what Rizin printed for [`RIZIN_COMMANDS`]. A jump
-/// to another function or to an import is a tail call and counts as a call; a jump
-/// inside a function does not. `tool` names the Rizin that ran.
+/// to an import, or to another function that something calls, is a tail call and
+/// counts as a call; any other jump does not. `tool` names the Rizin that ran.
 ///
 /// # Errors
 /// The output is not the four JSON values the commands print, or holds no function.
@@ -1148,9 +1148,15 @@ pub fn rizin_facts(tool: &str, output: &[u8]) -> Result<BinaryFacts, String> {
     });
     let mut imports: BTreeMap<u64, String> = stubs.chain(slots).chain(relocs).collect();
     let starts: BTreeSet<u64> = export.functions.iter().map(|f| f.offset).collect();
+    // Rizin also splits pieces of a function off as functions of their own, so only a
+    // function something calls is one a jump can leave for.
+    let entries: BTreeSet<u64> = (export.functions.iter().flat_map(|f| &f.callrefs))
+        .filter(|r| r.kind == "CALL" && starts.contains(&r.to))
+        .map(|r| r.to)
+        .collect();
     let function = |f: RizinFunction| {
         let leaves =
-            |to: u64| to != f.offset && (starts.contains(&to) || imports.contains_key(&to));
+            |to: u64| to != f.offset && (entries.contains(&to) || imports.contains_key(&to));
         let called = |r: &RizinRef| r.kind == "CALL" || (r.kind == "CODE" && leaves(r.to));
         Function {
             address: f.offset,
@@ -2190,9 +2196,10 @@ mod tests {
 
     #[test]
     fn call_edges_replay_on_a_rizin_export() -> Result<(), Box<dyn std::error::Error>> {
-        // What Rizin prints, one line per command, cut down to two functions. `main`
+        // What Rizin prints, one line per command, cut down to three functions. `main`
         // calls an import through its relocation, calls a function, jumps inside itself,
-        // and ends by jumping to another import.
+        // jumps into a piece of itself that Rizin split off as a function, and ends by
+        // jumping to another import. The piece ends by jumping to the function `main` calls.
         let output = br#"{"bintype":"elf","arch":"x86"}
             {"md5":"b6","sha256":"31"}
             [{"ordinal":1,"name":"setlocale"},{"ordinal":2,"name":"free"},{"name":"exit"}]
@@ -2202,7 +2209,10 @@ mod tests {
                 {"from":9350,"to":40864,"type":"CALL"},
                 {"from":9360,"to":9616,"type":"CALL"},
                 {"from":9370,"to":9400,"type":"CODE"},
-                {"from":9380,"to":40900,"type":"CODE"}]},
+                {"from":9380,"to":40900,"type":"CODE"},
+                {"from":9390,"to":9408,"type":"CODE"}]},
+            {"offset":9408,"name":"fcn.000024c0","callrefs":[
+                {"from":9412,"to":9616,"type":"CODE"}]},
             {"offset":9616,"name":"fcn.00002590","callrefs":[]}]"#;
         let facts = rizin_facts("rizin 0.9.1", output)?;
         assert_eq!(facts.tool, format!("rizin 0.9.1 ({RIZIN_COMMANDS})"));
@@ -2252,6 +2262,13 @@ mod tests {
             detail(named("main"), at(9400))?,
             "`main` at 0x2480 does not call the function at 0x24b8 directly; its 3 direct calls go to: fcn.00002590, setlocale, exit"
         );
+        // A jump into a piece Rizin split off is not a call either; a jump to a
+        // function something calls is a tail call.
+        assert_eq!(
+            detail(named("main"), named("fcn.000024c0"))?,
+            "`main` at 0x2480 does not call `fcn.000024c0` directly; its 3 direct calls go to: fcn.00002590, setlocale, exit"
+        );
+        assert_eq!(detail(at(9408), named("fcn.00002590"))?, "held");
         assert_eq!(
             detail(named("main"), named("free"))?,
             "`free` is neither a recovered function nor an import that is called"
