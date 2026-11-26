@@ -1341,6 +1341,13 @@ pub enum Event {
         claim: ClaimId,
         reason: String,
     },
+    /// The checkers of the program that writes this log, each with its version. From
+    /// here on a verdict counts only if it came from a checker listed here, at the
+    /// version listed. Written again whenever the set changes, so a verdict from a
+    /// checker that has since been fixed stops deciding a claim's status.
+    CheckersSet {
+        current: BTreeMap<String, u32>,
+    },
 }
 
 impl Event {
@@ -1526,8 +1533,8 @@ struct Entry {
 
 impl Entry {
     /// This claim's status, given the statuses of its premises.
-    fn status(&self, premise: impl Fn(usize) -> Status) -> Status {
-        let any = |f: fn(&Verdict) -> bool| self.verdicts.iter().any(f);
+    fn status(&self, current: &BTreeMap<String, u32>, premise: impl Fn(usize) -> Status) -> Status {
+        let any = |f: fn(&Verdict) -> bool| self.counted(current).any(|(v, counts)| counts && f(v));
         if self.retracted || self.lapsed.is_some() {
             Status::Retracted
         } else if any(|v| matches!(v, Verdict::Refuted { .. })) {
@@ -1536,11 +1543,28 @@ impl Entry {
             Status::Blocked
         } else if any(|v| matches!(v, Verdict::Held { .. })) {
             Status::Held
-        } else if self.verdicts.is_empty() {
+        } else if !self.counted(current).any(|(_, counts)| counts) {
             Status::Unchecked
         } else {
             Status::Inconclusive
         }
+    }
+}
+
+impl Entry {
+    /// Each verdict with whether it counts towards the status. Before the log lists
+    /// its checkers every verdict does; after that, only one from a listed checker
+    /// at the listed version.
+    fn counted<'a>(
+        &'a self,
+        current: &'a BTreeMap<String, u32>,
+    ) -> impl Iterator<Item = (&'a Verdict, bool)> {
+        let counts = move |checker: &Option<CheckerRef>| {
+            let listed = |c: &CheckerRef| current.get(&c.id) == Some(&c.version);
+            current.is_empty() || checker.as_ref().is_some_and(listed)
+        };
+        let checkers = self.checks.iter().map(|(_, checker)| checker);
+        self.verdicts.iter().zip(checkers.map(counts))
     }
 }
 
@@ -1552,6 +1576,8 @@ pub struct Ledger {
     /// (content-addressed), so this is also a dependency order.
     entries: Vec<Entry>,
     evidence: BTreeMap<EvidenceId, EvidenceKind>,
+    /// The checkers whose verdicts count, as the log last listed them.
+    checkers: BTreeMap<String, u32>,
 }
 
 impl Ledger {
@@ -1583,6 +1609,7 @@ impl Ledger {
                 let at = self.position(&claim)?;
                 self.entries[at].retracted = true;
             }
+            Event::CheckersSet { current } => self.checkers = current,
         }
         Ok(())
     }
@@ -1630,6 +1657,20 @@ impl Ledger {
     #[must_use]
     pub fn verdicts(&self, id: &ClaimId) -> &[Verdict] {
         self.entry(id).map_or(&[], |e| &e.verdicts)
+    }
+
+    /// A claim's verdicts, oldest first, each with whether it still counts towards
+    /// the status: one from a checker version that is no longer current does not.
+    pub fn current_verdicts(&self, id: &ClaimId) -> impl Iterator<Item = (&Verdict, bool)> {
+        let entry = self.entry(id).into_iter();
+        entry.flat_map(|e| e.counted(&self.checkers))
+    }
+
+    /// The checkers whose verdicts count, by id, as the log last listed them. Empty
+    /// until the log lists any.
+    #[must_use]
+    pub const fn checkers(&self) -> &BTreeMap<String, u32> {
+        &self.checkers
     }
 
     /// The verdict already recorded for exactly this check, if there is one: the same
@@ -1727,7 +1768,7 @@ impl Ledger {
         // Ascending position: every premise is settled before the claims that rest on it.
         let mut settled = BTreeMap::new();
         for at in closure {
-            let status = self.entries[at].status(|p| settled[&p]);
+            let status = self.entries[at].status(&self.checkers, |p| settled[&p]);
             settled.insert(at, status);
         }
         settled.get(&target).copied()
@@ -1737,7 +1778,7 @@ impl Ledger {
     pub fn statuses(&self) -> impl Iterator<Item = (&ClaimId, Status)> {
         let mut settled: Vec<Status> = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
-            let status = entry.status(|p| settled[p]);
+            let status = entry.status(&self.checkers, |p| settled[p]);
             settled.push(status);
         }
         self.entries.iter().map(|e| &e.id).zip(settled)
@@ -2244,6 +2285,78 @@ mod tests {
     }
 
     #[test]
+    fn a_verdict_from_another_checker_version_stops_counting() -> Result<(), CoreError> {
+        let set = |version: u32| {
+            let current = format!(r#"{{"memory_layout":{version}}}"#);
+            Event::decode(&format!(
+                r#"{{"event":"checkers_set","current":{current}}}"#
+            ))
+        };
+        let mut l = Ledger::default();
+        let (held, wrong) = (layout(32), layout(40));
+        let (held_id, wrong_id) = (held.id()?, wrong.id()?);
+        let mut dep = signature();
+        dep.premises.insert(held_id.clone());
+        let dep_id = dep.id()?;
+        for claim in [held, wrong, dep] {
+            l.apply(Event::Proposed {
+                claim: admit(claim)?,
+            })?;
+        }
+        let ev = EvidenceId::of(b"snapshot");
+        l.apply(Event::EvidenceAdded {
+            id: ev.clone(),
+            kind: EvidenceKind::MemorySnapshot,
+        })?;
+        let check = |claim: &ClaimId, verdict, checker: &str, version| Event::Checked {
+            claim: claim.clone(),
+            evidence: [ev.clone()].into(),
+            verdict,
+            checker: Some(CheckerRef {
+                id: checker.into(),
+                version,
+            }),
+        };
+        let yes = || Verdict::Held {
+            runs: NonZeroU64::MIN,
+        };
+        let no = Verdict::Refuted {
+            counterexample: Counterexample {
+                evidence: ev.clone(),
+                detail: "a bug in version 1".into(),
+            },
+        };
+        l.apply(check(&held_id, yes(), "memory_layout", 1))?;
+        l.apply(check(&wrong_id, no, "memory_layout", 1))?;
+        l.apply(check(&dep_id, yes(), "request_signature", 1))?;
+        // Until the log says which checkers are current, every verdict counts.
+        let status = |l: &Ledger| [&held_id, &wrong_id, &dep_id].map(|id| l.status(id));
+        let (held, refuted) = (Some(Status::Held), Some(Status::Refuted));
+        assert_eq!(status(&l), [held, refuted, held]);
+        l.apply(set(1)?)?;
+        // The signature checker is not listed, so its verdict no longer counts.
+        assert_eq!(status(&l), [held, refuted, Some(Status::Unchecked)]);
+        // The checker is fixed and its version bumped: its old verdicts lapse, the
+        // wrong refutation with them, and what rested on them goes on hold.
+        l.apply(set(2)?)?;
+        let unchecked = Some(Status::Unchecked);
+        assert_eq!(status(&l), [unchecked, unchecked, Some(Status::Blocked)]);
+        assert_eq!(
+            l.statuses().map(|(_, s)| Some(s)).collect::<Vec<_>>(),
+            status(&l)
+        );
+        // A fresh check by the current version counts again.
+        l.apply(check(&held_id, yes(), "memory_layout", 2))?;
+        assert_eq!(l.status(&held_id), held);
+        let counted: Vec<bool> = l
+            .current_verdicts(&held_id)
+            .map(|(_, counts)| counts)
+            .collect();
+        assert_eq!(counted, [false, true]);
+        Ok(())
+    }
+
+    #[test]
     fn status_follows_verdicts_and_premises() -> Result<(), CoreError> {
         let mut l = Ledger::default();
         let base = layout(32);
@@ -2517,7 +2630,7 @@ mod tests {
     /// The definition of status, as plain recursion. Exponential on shared premises.
     fn status_by_recursion(l: &Ledger, id: &ClaimId) -> Status {
         let entry = &l.entries[l.index[id]];
-        entry.status(|p| status_by_recursion(l, &l.entries[p].id))
+        entry.status(&l.checkers, |p| status_by_recursion(l, &l.entries[p].id))
     }
 
     /// Claim `n` rests on the claims named in `premises` (earlier ones only).
