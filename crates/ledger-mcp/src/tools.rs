@@ -7,10 +7,10 @@ use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use ledger_checkers::{CheckError, check_claim, checker_of, har_exchanges};
+use ledger_checkers::{CheckError, check_claim, checker_of, har_exchanges, is_about};
 use ledger_core::{
     CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event, EvidenceId, EvidenceKind,
-    Ledger, Status, Verdict, admit,
+    HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict, admit,
 };
 use ledger_store::{Snapshot, Store, StoreError};
 use schemars::JsonSchema;
@@ -399,6 +399,50 @@ pub fn propose(store: &Store, mut claim: Claim, evidence: &[String]) -> Result<S
         let _ = write!(out, "\n{line}");
     }
     Ok(stamp(&after, &out))
+}
+
+/// [`propose`] on every capture in the ledger that the claim is about: its endpoint
+/// and the responses it covers. The agent does not have to pick them out, and a
+/// capture of another status cannot get in by mistake. For claims about snapshots,
+/// which are not indexed by what they show, it files the claim unchecked.
+///
+/// # Errors
+/// As [`propose`].
+pub fn propose_on_all(store: &Store, claim: Claim) -> Result<String, Rejection> {
+    let mut about = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let chunk = store.http_evidence(cursor.as_deref(), 500)?;
+        for (id, line) in &chunk {
+            // The index holds the request line and status, which is all the scope needs.
+            let exchange = HttpExchange {
+                request: HttpRequest {
+                    method: line.method.clone(),
+                    url: line.url.clone(),
+                    headers: Vec::new(),
+                    body: None,
+                },
+                response: line.status.map(|status| HttpResponse {
+                    status,
+                    headers: Vec::new(),
+                    body: None,
+                }),
+            };
+            if is_about(&claim.kind, &exchange) {
+                about.push(id.clone());
+            }
+        }
+        match chunk.last() {
+            Some((id, _)) if chunk.len() == 500 => cursor = Some(id.clone()),
+            _ => break,
+        }
+    }
+    let found = about.len();
+    let mut out = propose(store, claim, &about)?;
+    if found == 0 {
+        out.push_str("\nno capture in this ledger is about this claim");
+    }
+    Ok(out)
 }
 
 /// Which fixed question `ask` answers.
@@ -894,6 +938,27 @@ mod tests {
                 Some("GET crates.io/api/v1/crates/{name}?include"),
                 None,
             ),
+        );
+        // A claim about 200 responses, replayed on all its captures: the 404 and the script stay out.
+        let found = Claim {
+            kind: ClaimKind::ResponseSchema(ledger_core::ResponseSchema {
+                endpoint: crates.into(),
+                status: 200,
+                schema: rmcp::serde_json::json!({"required": ["id"]}),
+            }),
+            premises: BTreeSet::new(),
+        };
+        say(
+            "propose on all captures: 200 responses of the crate endpoint",
+            propose_on_all(&store, found.clone()),
+        );
+        let mut elsewhere = found;
+        if let ClaimKind::ResponseSchema(schema) = &mut elsewhere.kind {
+            schema.endpoint = "GET docs.rs/crate/{name}".into();
+        }
+        say(
+            "propose on all captures: an endpoint nothing was captured for",
+            propose_on_all(&store, elsewhere),
         );
         say(
             "ask about=evidence, an endpoint nothing was captured for",

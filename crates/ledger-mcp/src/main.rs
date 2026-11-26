@@ -22,6 +22,10 @@ struct ProposeArgs {
     /// Ids of evidence to replay the claim against right away.
     #[serde(default)]
     evidence: Vec<String>,
+    /// For a web claim: replay it against every capture in the ledger that it is
+    /// about, instead of listing them in `evidence`.
+    #[serde(default)]
+    all_captures: bool,
 }
 
 #[derive(rmcp::serde::Deserialize, JsonSchema)]
@@ -102,7 +106,11 @@ impl LedgerServer {
         Parameters(args): Parameters<ProposeArgs>,
     ) -> Result<String, ErrorData> {
         self.blocking("propose", move |store| {
-            tools::propose(store, args.claim, &args.evidence)
+            if args.all_captures {
+                tools::propose_on_all(store, args.claim)
+            } else {
+                tools::propose(store, args.claim, &args.evidence)
+            }
         })
         .await
     }

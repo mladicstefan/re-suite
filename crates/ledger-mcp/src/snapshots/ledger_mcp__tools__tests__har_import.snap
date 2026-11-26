@@ -24,8 +24,17 @@ seq 5
 evidence fb731a8cb158  200  GET https://crates.io/api/v1/crates/serde
 end
 
+propose on all captures: 200 responses of the crate endpoint
+seq 7
+held         9065258c1d41  200 responses to `GET crates.io/api/v1/crates/{name}` match JSON Schema 82813812: 0 properties, 1 required.
+
+propose on all captures: an endpoint nothing was captured for
+seq 8
+unchecked    85ba42a22160  200 responses to `GET docs.rs/crate/{name}` match JSON Schema 82813812: 0 properties, 1 required.
+no capture in this ledger is about this claim
+
 ask about=evidence, an endpoint nothing was captured for
-seq 5
+seq 8
 nothing
 
 ask about=evidence, not an endpoint
