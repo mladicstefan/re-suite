@@ -794,6 +794,18 @@ pub fn add_rizin_output(store: &Store, tool: &str, output: &[u8]) -> Result<Stri
         )
     })?;
     let stored = rmcp::serde_json::to_vec(&facts).map_err(|e| StoreError::Core(e.into()))?;
+    // Every check would refuse facts over the limit, so they are not stored either.
+    if stored.len() > MAX_PARSED_EVIDENCE {
+        return Err(reject(
+            "evidence_too_large",
+            "rizin",
+            format!(
+                "What Rizin recovered is {} bytes, limit {MAX_PARSED_EVIDENCE}.",
+                stored.len()
+            ),
+            "Nothing was recorded. Tell the human: this program is too large to check claims on.",
+        ));
+    }
     let id = store.add_evidence(EvidenceKind::BinaryFacts, &stored)?;
     let calls: usize = facts.functions.iter().map(|f| f.calls.len()).sum();
     let body = format!(
@@ -1283,6 +1295,24 @@ mod tests {
             ask(&store, About::Subject, None, Some("true"), None),
         );
         insta::assert_snapshot!("rizin_import", log);
+        Ok(())
+    }
+
+    #[test]
+    fn facts_over_the_evidence_limit_are_refused_when_added() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let before = store.snapshot().seq;
+        // One function whose name alone is as long as the limit.
+        let name = "f".repeat(MAX_PARSED_EVIDENCE);
+        let output = format!(
+            r#"{{"bintype":"elf"}} {{"sha256":"00"}} [] [] [{{"offset":1,"name":"{name}"}}]"#
+        );
+        let refused = add_rizin_output(&store, "rizin", output.as_bytes());
+        let refused = refused.err().ok_or("stored")?;
+        assert_eq!(refused.code, "evidence_too_large");
+        assert!(refused.next.starts_with("Nothing was recorded."));
+        assert_eq!(store.snapshot().seq, before);
         Ok(())
     }
 
