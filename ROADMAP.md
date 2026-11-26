@@ -378,7 +378,10 @@ the ledger changes no status, and the write and read budgets hold.
       claims checked "within the recovered code", assumptions listed.
       One claim kind so far, a direct call between two functions
       (`docs/trials/crash-handler.md`)
-- [ ] **Measure RzIL coverage** on our own targets
+- [x] **Measure RzIL coverage** on our own targets: 96% to 98% of
+      instructions, but only 55% to 80% of functions in full, and on
+      x86-64 an unlifted instruction looks like one that does nothing
+      (`docs/trials/rzil-coverage.md`). A second lifter was not compared
 
 Done when all five target types have at least one checked claim kind, and
 a new build of a target produces a correct "holds / moved / failed"
@@ -510,10 +513,10 @@ honestly.
 | --- | --- |
 | Does the loop cut tokens and false claims on real RE tasks? | End of Phase 1 |
 | A rerun ties a web claim to its endpoint and a snapshot claim to its type name, and suggests a move from a bounded search (`docs/trials/version-rerun.md`). That was tried on a simulated pair of builds only. Which anchor survives real version changes with the fewest false matches? | The first real pair of target versions |
-| How much of x86-64 and AArch64 does RzIL lift, and how often does it disagree with a second lifter? | End of Phase 2 |
+| RzIL lifts 96% to 98% of instructions on both, and 55% to 80% of functions in full (`docs/trials/rzil-coverage.md`). How often does it disagree with a second lifter? None is installed. | End of Phase 2 |
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
 | A web claim covers an endpoint and a status, not a content type, so `GET /{page}` cannot mean "pages, not files". And no claim kind speaks about a page load as a whole (which hosts it contacts) or reads HTML. Which of these should become claims? | Phase 2, formats |
-| Rizin left 27% of one program's code ranges in no function, and a claim can only be about a function the tool found (`docs/trials/crash-handler.md`). Should the export take function starts from a second source, such as the exception table? And should "held on N" need two tools to agree? | With the RzIL coverage measurement |
+| With a wider analysis Rizin still leaves 11.5% of one Windows program's code ranges in no function, and now reads some padding and data as functions (`docs/trials/rzil-coverage.md`). Should function starts come from the exception table instead? And should "held on N" need two tools to agree? | Before the second binary claim kind |
 | Without symbols a function's name is its address. What ties a binary claim to the same function in the next build? | The first real pair of target versions |
 | How far does VerifiedIDA's standard overlap, and should we build on it or interoperate? | Before the open format in Phase 6 |
 

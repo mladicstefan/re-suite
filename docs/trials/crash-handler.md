@@ -100,7 +100,9 @@ was compared with two other readings of the same file.
 - **Open: a claim can only be about what the tool found.** With 27% of
   the code ranges unrecovered, a quarter of the program is out of reach.
   The exception table is a second, independent list of where functions
-  start; feeding it to the analysis should close most of the gap.
+  start; feeding it to the analysis should close most of the gap. A
+  wider analysis has since brought the 27% down to 11.5%
+  (`rzil-coverage.md`).
 - **Open: "held on 1" counts exports, not observations.** One tool read
   one file once. A second tool reading the same file would make the
   number mean something; objdump was used for that by hand here.

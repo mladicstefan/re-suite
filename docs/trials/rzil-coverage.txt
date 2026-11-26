@@ -1,0 +1,56 @@
+
+## UnityCrashHandler64.exe: pe x86-64
+`e analysis.hasnext=true; aaa; aap`: 24.9 s, 2152 functions (615 not in the table, 30 starting inside the one before), 152814 instructions, unwind ranges recovered 2058 of 2325 (88.5%)
+  calls agree with objdump in 2081 of 2083 single-range functions (99.90%)
+  lifting: 148301 lifted, 4513 as no effect (4511 of them not nops), 0 not lifted; 97.05% of instructions have a usable meaning
+  not lifted: none
+  no effect but not a nop: movups 1278, int3 734, xorps 517, movdqa 270, movaps 229, xmmword 216, setz 113, psrldq 91, bt 84, bts 77, setnz 72, movq 67
+  functions lifted in full: 1185 of 2152 (55.1%)
+`aaa`: 20.9 s, 1461 functions (216 not in the table, 42 starting inside the one before), 135016 instructions, unwind ranges recovered 1732 of 2325 (74.5%)
+  calls agree with objdump in 1383 of 1386 single-range functions (99.78%)
+`aaa; aap`: 20.8 s, 1461 functions (216 not in the table, 42 starting inside the one before), 135016 instructions, unwind ranges recovered 1732 of 2325 (74.5%)
+  calls agree with objdump in 1383 of 1386 single-range functions (99.78%)
+`e analysis.hasnext=true; aaa`: 23.0 s, 2152 functions (615 not in the table, 30 starting inside the one before), 152814 instructions, unwind ranges recovered 2058 of 2325 (88.5%)
+  calls agree with objdump in 2081 of 2083 single-range functions (99.90%)
+
+## ls: elf x86-64
+`e analysis.hasnext=true; aaa; aap`: 3.9 s, 336 functions (32 not in the table, 18 starting inside the one before), 24578 instructions, unwind ranges recovered 333 of 333 (100.0%)
+  calls agree with objdump in 143 of 143 single-range functions (100.00%)
+  lifting: 23309 lifted, 1269 as no effect (1016 of them not nops), 0 not lifted; 95.87% of instructions have a usable meaning
+  not lifted: none
+  no effect but not a nop: setz 153, movdqa 103, movups 95, movaps 75, setnz 69, setnle 66, setl 65, xmm0, 59, pxor 34, pcmpgtd 28, pand 22, por 20
+  functions lifted in full: 201 of 336 (59.8%)
+`aaa`: 3.4 s, 156 functions (3 not in the table, 22 starting inside the one before), 20385 instructions, unwind ranges recovered 186 of 333 (55.9%)
+  calls agree with objdump in 50 of 50 single-range functions (100.00%)
+`aaa; aap`: 3.7 s, 342 functions (51 not in the table, 48 starting inside the one before), 24548 instructions, unwind ranges recovered 333 of 333 (100.0%)
+  calls agree with objdump in 147 of 147 single-range functions (100.00%)
+`e analysis.hasnext=true; aaa`: 3.8 s, 294 functions (25 not in the table, 16 starting inside the one before), 23366 instructions, unwind ranges recovered 297 of 333 (89.2%)
+  calls agree with objdump in 132 of 132 single-range functions (100.00%)
+
+## ninja: elf arm-64
+`e analysis.hasnext=true; aaa; aap`: 5.7 s, 797 functions (540 not in the table, 15 starting inside the one before), 44190 instructions, unwind ranges recovered 267 of 273 (97.8%)
+  calls agree with llvm-objdump in 761 of 763 single-range functions (99.74%)
+  lifting: 43393 lifted, 0 as no effect (0 of them not nops), 797 not lifted; 98.20% of instructions have a usable meaning
+  not lifted: fmov 162, str 138, ldr 102, invalid 93, udf 84, stp 21, scvtf 21, fdiv 19, ldp 18, movi 14, dup 13, add 9
+  no effect but not a nop: none
+  functions lifted in full: 639 of 797 (80.2%)
+`aaa`: 5.4 s, 432 functions (183 not in the table, 9 starting inside the one before), 41164 instructions, unwind ranges recovered 255 of 273 (93.4%)
+  calls agree with llvm-objdump in 415 of 419 single-range functions (99.05%)
+`aaa; aap`: 5.4 s, 435 functions (184 not in the table, 10 starting inside the one before), 41609 instructions, unwind ranges recovered 255 of 273 (93.4%)
+  calls agree with llvm-objdump in 417 of 421 single-range functions (99.05%)
+`e analysis.hasnext=true; aaa`: 5.7 s, 794 functions (539 not in the table, 14 starting inside the one before), 43745 instructions, unwind ranges recovered 267 of 273 (97.8%)
+  calls agree with llvm-objdump in 759 of 761 single-range functions (99.74%)
+
+## librz_core.so.0.9.1: elf x86-64
+`e analysis.hasnext=true; aaa; aap`: 80.3 s, 4427 functions (731 not in the table, 63 starting inside the one before), 378886 instructions, unwind ranges recovered 3750 of 3750 (100.0%)
+  calls agree with objdump in 1951 of 1954 single-range functions (99.85%)
+  lifting: 368424 lifted, 10462 as no effect (7215 of them not nops), 0 not lifted; 98.10% of instructions have a usable meaning
+  not lifted: none
+  no effect but not a nop: movaps 1515, movups 1447, movdqa 1045, setz 538, xmm0, 538, setnz 348, pxor 302, movq 185, xmm1, 115, bswap 115, ud2 113, cdqe 98
+  functions lifted in full: 3562 of 4427 (80.5%)
+`aaa`: 43.0 s, 1491 functions (3 not in the table, 49 starting inside the one before), 226711 instructions, unwind ranges recovered 1533 of 3750 (40.9%)
+  calls agree with objdump in 186 of 187 single-range functions (99.47%)
+`aaa; aap`: 62.7 s, 4887 functions (1204 not in the table, 119 starting inside the one before), 377968 instructions, unwind ranges recovered 3748 of 3750 (99.9%)
+  calls agree with objdump in 2394 of 2397 single-range functions (99.87%)
+`e analysis.hasnext=true; aaa`: 79.3 s, 3651 functions (646 not in the table, 53 starting inside the one before), 352206 instructions, unwind ranges recovered 3052 of 3750 (81.4%)
+  calls agree with objdump in 1509 of 1511 single-range functions (99.87%)
