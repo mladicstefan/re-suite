@@ -85,6 +85,7 @@ fn claim_subject(kind: &ClaimKind) -> &str {
         ClaimKind::FieldRelation(c) => &c.type_name,
         ClaimKind::TaggedRecords(c) => &c.type_name,
         ClaimKind::StringTable(c) => &c.type_name,
+        ClaimKind::CallEdge(c) => &c.binary,
         ClaimKind::RequestSignature(c) => &c.endpoint,
         ClaimKind::RequestHeader(c) => &c.endpoint,
         ClaimKind::RequestBodySchema(c) => &c.endpoint,

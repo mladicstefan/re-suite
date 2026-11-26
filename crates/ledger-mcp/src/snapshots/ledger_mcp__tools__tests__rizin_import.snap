@@ -1,0 +1,23 @@
+---
+source: crates/ledger-mcp/src/tools.rs
+expression: log
+---
+add_evidence true.facts.json
+seq 1
+evidence 7b39294c20d9
+imported from the Rizin export of binary sha256 3141dd350680: functions 2, direct calls 2, called imports 1
+
+propose: main calls setlocale
+seq 3
+held         717b038f1a79  Within the code recovered from `true`, `main` calls `setlocale` directly (assumes the tool's analysis is right).
+
+propose: fcn.00002590 calls main
+seq 5
+refuted      b380f065dd7f  Within the code recovered from `true`, `fcn.00002590` calls `main` directly (assumes the tool's analysis is right).
+refuted by 7b39294c20d9: `fcn.00002590` at 0x2590 does not call `main` directly; it makes no direct calls
+
+ask about=subject true
+seq 5
+held         717b038f1a79  Within the code recovered from `true`, `main` calls `setlocale` directly (assumes the tool's analysis is right).
+refuted      b380f065dd7f  Within the code recovered from `true`, `fcn.00002590` calls `main` directly (assumes the tool's analysis is right).
+end

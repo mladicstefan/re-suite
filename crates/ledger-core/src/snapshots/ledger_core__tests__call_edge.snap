@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "calls(FunctionRef::Address(0x2480), named(\"setlocale\")).sentence()"
+---
+Within the code recovered from `true`, the function at 0x2480 calls `setlocale` directly (assumes the tool's analysis is right).

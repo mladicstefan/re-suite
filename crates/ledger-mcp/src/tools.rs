@@ -7,10 +7,10 @@ use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use ledger_checkers::{CheckError, check_claim, checker_of, har_exchanges, is_about};
+use ledger_checkers::{CheckError, check_claim, checker_of, har_exchanges, is_about, rizin_facts};
 use ledger_core::{
-    CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event, EvidenceId, EvidenceKind,
-    HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict, admit,
+    BinaryFacts, CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event, EvidenceId,
+    EvidenceKind, HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict, admit,
 };
 use ledger_store::{Snapshot, Store, StoreError};
 use schemars::JsonSchema;
@@ -121,7 +121,7 @@ impl From<CheckError> for Rejection {
                 "evidence_not_applicable",
                 id,
                 format!("It is {what}, which the claim says nothing about."),
-                "The claim is filed but unchecked. Replay only captures of the claim's own endpoint and status.",
+                "The claim is filed but unchecked. Replay only evidence the claim is about: captures of its endpoint and status, or an analysis that recovered its caller.",
             ),
             CheckError::TooLarge(id, size, max) => reject(
                 "evidence_too_large",
@@ -654,12 +654,35 @@ pub fn explain(store: &Store, claim: &str) -> Result<String, Rejection> {
     Ok(stamp(&snapshot, &out))
 }
 
+/// Stores a Rizin export as the facts it holds: its functions and direct calls.
+fn add_rizin_facts(store: &Store, facts: &BinaryFacts) -> Result<String, Rejection> {
+    let stored = rmcp::serde_json::to_vec(facts).map_err(|e| StoreError::Core(e.into()))?;
+    let id = store.add_evidence(EvidenceKind::BinaryFacts, &stored)?;
+    let calls: usize = facts.functions.iter().map(|f| f.calls.len()).sum();
+    let body = format!(
+        "evidence {}\nimported from the Rizin export of binary sha256 {3}: functions {1}, direct calls {calls}, called imports {2}",
+        short(id.as_str()),
+        facts.functions.len(),
+        facts.imports.len(),
+        short(&facts.sha256)
+    );
+    Ok(stamp(&store.snapshot(), &body))
+}
+
 /// Stores a local capture file as evidence and returns its id. A HAR file given
-/// as `http_exchange` is split into one piece of evidence per entry.
+/// as `http_exchange` is split into one piece of evidence per entry, and a Rizin
+/// export given as `binary_facts` is cut down to its functions and calls.
 ///
 /// # Errors
 /// The file cannot be read or stored.
 pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<String, Rejection> {
+    let export = (kind == EvidenceKind::BinaryFacts)
+        .then(|| std::fs::read(path).ok())
+        .flatten()
+        .and_then(|bytes| rizin_facts(&bytes));
+    if let Some(facts) = export {
+        return add_rizin_facts(store, &facts);
+    }
     let har = (kind == EvidenceKind::HttpExchange)
         .then(|| std::fs::read(path).ok())
         .flatten()
@@ -980,6 +1003,66 @@ mod tests {
         );
         insta::assert_snapshot!("har_import", log);
         assert!(!log.contains("s3cret"), "a query string was echoed");
+        Ok(())
+    }
+
+    #[test]
+    fn a_rizin_export_is_imported_and_call_edges_replay_on_it() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        // The shape `scripts/rizin-facts.sh` writes; fields the import ignores are left in.
+        let export = rmcp::serde_json::json!({
+            "tool": "rizin 0.9.1 @ linux-x86-64 (aaa)",
+            "hashes": {"md5": "b6e0", "sha256": "3141dd3506805dc7a68851abaf0bd3fd8466ca0ff1746f61c8243e2a869f55e0"},
+            "imports": [{"ordinal": 1, "name": "setlocale"}],
+            "relocs": [{"name": "setlocale", "type": "R_X86_64_GLOB_DAT", "vaddr": 40864}],
+            "functions": [
+                {"offset": 9344, "name": "main", "size": 262, "callrefs": [
+                    {"from": 9350, "to": 40864, "type": "CALL"},
+                    {"from": 9360, "to": 9616, "type": "CALL"}]},
+                {"offset": 9616, "name": "fcn.00002590", "size": 40},
+            ],
+        });
+        let file = dir.path().join("true.facts.json");
+        std::fs::write(&file, export.to_string())?;
+        let path = file.to_str().ok_or("path")?;
+        let added = add_evidence(&store, EvidenceKind::BinaryFacts, path);
+        let added = added.map_err(|r| r.to_string())?;
+        let facts = id_in(&added).to_owned();
+        let calls = |caller: &str, callee: &str| Claim {
+            kind: ClaimKind::CallEdge(ledger_core::CallEdge {
+                binary: "true".into(),
+                caller: ledger_core::FunctionRef::Name(caller.into()),
+                callee: ledger_core::FunctionRef::Name(callee.into()),
+            }),
+            premises: BTreeSet::new(),
+        };
+        let mut log = format!("add_evidence true.facts.json\n{added}\n\n");
+        let mut say = |what: &str, result: Result<String, Rejection>| {
+            let text = result.unwrap_or_else(|r| format!("REJECTED {r}"));
+            let _ = write!(log, "{what}\n{text}\n\n");
+        };
+        say(
+            "propose: main calls setlocale",
+            propose(
+                &store,
+                calls("main", "setlocale"),
+                std::slice::from_ref(&facts),
+            ),
+        );
+        say(
+            "propose: fcn.00002590 calls main",
+            propose(
+                &store,
+                calls("fcn.00002590", "main"),
+                std::slice::from_ref(&facts),
+            ),
+        );
+        say(
+            "ask about=subject true",
+            ask(&store, About::Subject, None, Some("true"), None),
+        );
+        insta::assert_snapshot!("rizin_import", log);
         Ok(())
     }
 

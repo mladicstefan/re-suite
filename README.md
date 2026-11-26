@@ -41,7 +41,7 @@ verdict  held on 6 captures
 
 ## Claim kinds
 
-A claim is one of eleven typed statements. Each has an admission rule, a sentence, and a
+A claim is one of twelve typed statements. Each has an admission rule, a sentence, and a
 checker that replays it on saved evidence.
 
 | Kind | Says | Checked on |
@@ -57,6 +57,7 @@ checker that replays it on saved evidence.
 | `response_schema` | responses with one status match a JSON Schema | HTTP exchanges |
 | `response_header` | responses with one status carry a header whose value matches a schema | HTTP exchanges |
 | `status_set` | an endpoint only answers with the listed statuses | HTTP exchanges |
+| `call_edge` | one function calls another directly, within the code a tool recovered | Rizin exports |
 
 Toolchain: Rust 1.100.0 (pinned in `rust-toolchain.toml`), edition 2024, resolver 3.
 
@@ -90,4 +91,5 @@ From `cargo tree -p <crate> --depth 1`:
 cargo run -p ledger-mcp -- ledger.db   # MCP server on stdio
 cargo run -p ledger-cli -- ledger.db   # list claims with status
 scripts/ci.sh                          # fmt, clippy, nextest, doctests, deny, machete
+scripts/rizin-facts.sh <binary>        # what Rizin recovers from a binary, as evidence
 ```

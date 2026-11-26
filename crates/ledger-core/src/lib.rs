@@ -453,9 +453,61 @@ impl ResponseHeader {
     }
 }
 
+/// A function in a binary, named by the address it starts at or by the name the
+/// analysis tool gives it. Addresses change from build to build; names mostly do not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FunctionRef {
+    Address(u64),
+    Name(String),
+}
+
+impl fmt::Display for FunctionRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Address(at) => write!(f, "the function at {at:#x}"),
+            Self::Name(name) => write!(f, "`{name}`"),
+        }
+    }
+}
+
+/// One function calls another directly, within the code a tool recovered from a
+/// binary. A jump to another function counts (a tail call). Says nothing about
+/// calls through a pointer the tool could not resolve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CallEdge {
+    /// A name for the binary, such as its file name.
+    pub binary: String,
+    pub caller: FunctionRef,
+    /// A function, or by name an imported symbol such as `malloc`.
+    pub callee: FunctionRef,
+}
+
+impl CallEdge {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        format!(
+            "Within the code recovered from `{}`, {} calls {} directly (assumes the tool's analysis is right).",
+            self.binary, self.caller, self.callee
+        )
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        let unnamed = |f: &FunctionRef| matches!(f, FunctionRef::Name(name) if name.is_empty());
+        if self.binary.is_empty() || unnamed(&self.caller) || unnamed(&self.callee) {
+            return Err(String::from(
+                "a call edge needs a binary name and no empty function name",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimKind {
+    CallEdge(CallEdge),
     ResponseHeader(ResponseHeader),
     StringTable(StringTable),
     TaggedRecords(TaggedRecords),
@@ -491,6 +543,7 @@ impl Claim {
     #[must_use]
     pub const fn subject(&self) -> &str {
         match &self.kind {
+            ClaimKind::CallEdge(c) => c.binary.as_str(),
             ClaimKind::ResponseHeader(h) => h.endpoint.as_str(),
             ClaimKind::StringTable(t) => t.type_name.as_str(),
             ClaimKind::TaggedRecords(t) => t.type_name.as_str(),
@@ -513,10 +566,11 @@ impl Claim {
             serde_json::to_value(&self.kind).ok()?,
             serde_json::to_value(&earlier.kind).ok()?,
         );
-        // Two claims about one endpoint are still about different things if they name
-        // different headers or statuses; one does not replace the other.
-        let topic =
-            |kind: &serde_json::Value| (kind.get("header").cloned(), kind.get("status").cloned());
+        // Two claims about one subject are still about different things if they name
+        // different headers, statuses or functions; one does not replace the other.
+        let topic = |kind: &serde_json::Value| {
+            ["header", "status", "caller", "callee"].map(|part| kind.get(part).cloned())
+        };
         if now.get("kind") != was.get("kind")
             || self.subject() != earlier.subject()
             || topic(&now) != topic(&was)
@@ -532,6 +586,7 @@ impl Claim {
     #[must_use]
     pub fn sentence(&self) -> String {
         match &self.kind {
+            ClaimKind::CallEdge(c) => c.sentence(),
             ClaimKind::ResponseHeader(c) => c.sentence(),
             ClaimKind::StringTable(c) => c.sentence(),
             ClaimKind::TaggedRecords(c) => c.sentence(),
@@ -960,6 +1015,7 @@ impl ResponseSchema {
 /// `CoreError::Inadmissible` with the reason.
 pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
     let admissible = match &claim.kind {
+        ClaimKind::CallEdge(c) => c.admissible(),
         ClaimKind::ResponseHeader(c) => c.admissible(),
         ClaimKind::StringTable(c) => c.admissible(),
         ClaimKind::TaggedRecords(c) => c.admissible(),
@@ -990,6 +1046,34 @@ pub enum EvidenceKind {
     HttpExchange,
     /// A signing key or other secret, as raw bytes. Cited by claims, never shown.
     Secret,
+    /// What an analysis tool recovered from one binary, as [`BinaryFacts`].
+    BinaryFacts,
+}
+
+/// One function an analysis tool recovered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Function {
+    /// Where the function starts.
+    pub address: u64,
+    pub name: String,
+    /// The addresses it calls directly, or ends by jumping to (a tail call).
+    #[serde(default)]
+    pub calls: BTreeSet<u64>,
+}
+
+/// Evidence format for `EvidenceKind::BinaryFacts`: the functions and direct calls a
+/// tool recovered from one binary. A claim checked against it holds within this
+/// recovered code, which is only as right as the tool's analysis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryFacts {
+    /// The tool, its version and the analysis it ran.
+    pub tool: String,
+    /// SHA-256 of the binary the facts came from, in hex.
+    pub sha256: String,
+    pub functions: Vec<Function>,
+    /// Called addresses that stand for an imported symbol, with the symbol's name.
+    #[serde(default)]
+    pub imports: BTreeMap<u64, String>,
 }
 
 /// One header line. A list of these, not a map: names repeat, and HTTP/2 captures
@@ -2121,6 +2205,26 @@ mod tests {
 
     #[test]
     fn sentences_of_newer_kinds() {
+        let calls = |caller, callee| Claim {
+            kind: ClaimKind::CallEdge(CallEdge {
+                binary: "true".into(),
+                caller,
+                callee,
+            }),
+            premises: BTreeSet::new(),
+        };
+        let named = |name: &str| FunctionRef::Name(name.into());
+        insta::assert_snapshot!(
+            "call_edge",
+            calls(FunctionRef::Address(0x2480), named("setlocale")).sentence()
+        );
+        assert!(admit(calls(named("main"), named("main"))).is_ok());
+        assert!(admit(calls(named("main"), named(""))).is_err());
+        // Two call edges in one binary are two findings, not one revised.
+        assert_eq!(
+            calls(named("main"), named("exit")).revision_of(&calls(named("main"), named("abort"))),
+            None
+        );
         let relation = |equals| Claim {
             kind: ClaimKind::FieldRelation(FieldRelation {
                 type_name: "SaveDirEntry".into(),

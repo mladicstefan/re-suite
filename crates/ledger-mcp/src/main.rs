@@ -50,7 +50,8 @@ struct ExplainArgs {
 #[serde(crate = "rmcp::serde")]
 struct AddEvidenceArgs {
     kind: EvidenceKind,
-    /// Local path of a saved capture or snapshot.
+    /// Local path of a saved capture, a snapshot, or for `binary_facts` the output
+    /// of `scripts/rizin-facts.sh <binary>`.
     path: String,
 }
 

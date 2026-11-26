@@ -2,6 +2,7 @@
 
 pub mod rerun;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -9,9 +10,9 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
 use ledger_core::{
-    Body, CheckerRef, ClaimId, ClaimKind, Counterexample, Endpoint, EvidenceId, EvidenceKind,
-    FieldKind, HttpExchange, HttpRequest, MemoryLayout, RequestSignature, ResponseSchema,
-    SigAlgorithm, SigEncoding, SignedPart, Verdict,
+    BinaryFacts, Body, CheckerRef, ClaimId, ClaimKind, Counterexample, Endpoint, EvidenceId,
+    EvidenceKind, FieldKind, Function, FunctionRef, HttpExchange, HttpRequest, MemoryLayout,
+    RequestSignature, ResponseSchema, SigAlgorithm, SigEncoding, SignedPart, Verdict,
 };
 use md5::Digest as _;
 use rayon::prelude::*;
@@ -765,11 +766,88 @@ impl Checker<'_> for ResponseHeaderChecker {
     }
 }
 
+pub struct CallEdgeChecker;
+
+impl Checker<'_> for CallEdgeChecker {
+    const ID: &'static str = "call_edge";
+    const VERSION: u32 = 1;
+    type Claim = ledger_core::CallEdge;
+    type Evidence = BinaryFacts;
+
+    fn check(
+        &self,
+        claim: &Self::Claim,
+        evidence: &[Item<BinaryFacts>],
+        deadline: Instant,
+    ) -> Result<Verdict, CheckError> {
+        let is = |f: &&Function, wanted: &FunctionRef| match wanted {
+            FunctionRef::Address(at) => f.address == *at,
+            FunctionRef::Name(name) => f.name == *name,
+        };
+        // An analysis that did not recover the caller does not know what it calls, so it
+        // cannot refute the claim: tools miss functions that are there.
+        let recovered = |facts: &BinaryFacts| facts.functions.iter().any(|f| is(&f, &claim.caller));
+        if let Some(blind) = evidence.iter().find(|it| !recovered(&it.data)) {
+            return Err(CheckError::NotApplicable(
+                blind.id.clone(),
+                format!("an analysis that did not recover {}", claim.caller),
+            ));
+        }
+        Ok(replay(evidence, deadline, |facts| {
+            let functions = facts.functions.iter();
+            let Some(caller) = functions.clone().find(|f| is(f, &claim.caller)) else {
+                return Err(format!("{} is not in the recovered code", claim.caller));
+            };
+            // A name can stand for a recovered function or for an imported symbol.
+            let mut targets: Vec<u64> = (functions.clone().filter(|f| is(f, &claim.callee)))
+                .map(|f| f.address)
+                .collect();
+            match &claim.callee {
+                FunctionRef::Address(at) => targets.push(*at),
+                FunctionRef::Name(name) => {
+                    let imported = facts.imports.iter().filter(|(_, import)| *import == name);
+                    targets.extend(imported.map(|(at, _)| *at));
+                }
+            }
+            if targets.is_empty() {
+                return Err(format!(
+                    "{} is neither a recovered function nor an import that is called",
+                    claim.callee
+                ));
+            }
+            if caller.calls.iter().any(|to| targets.contains(to)) {
+                return Ok(());
+            }
+            let name_of = |to: &u64| {
+                let function = || functions.clone().find(|f| f.address == *to);
+                let name =
+                    (facts.imports.get(to).cloned()).or_else(|| function().map(|f| f.name.clone()));
+                name.unwrap_or_else(|| format!("{to:#x}"))
+            };
+            let calls: Vec<String> = caller.calls.iter().map(name_of).collect();
+            let made = if calls.is_empty() {
+                String::from("it makes no direct calls")
+            } else {
+                format!(
+                    "its {} direct calls go to: {}",
+                    calls.len(),
+                    calls.join(", ")
+                )
+            };
+            Err(format!(
+                "`{}` at {:#x} does not call {} directly; {made}",
+                caller.name, caller.address, claim.callee
+            ))
+        }))
+    }
+}
+
 /// The checker that `check_claim` runs for a claim, by id and version. With the
 /// claim and the evidence, this is what a recorded verdict is cached on.
 #[must_use]
 pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
     let (id, version) = match claim {
+        ClaimKind::CallEdge(_) => (CallEdgeChecker::ID, CallEdgeChecker::VERSION),
         ClaimKind::ResponseHeader(_) => (ResponseHeaderChecker::ID, ResponseHeaderChecker::VERSION),
         ClaimKind::StringTable(_) => (StringTableChecker::ID, StringTableChecker::VERSION),
         ClaimKind::TaggedRecords(_) => (TaggedRecordsChecker::ID, TaggedRecordsChecker::VERSION),
@@ -844,7 +922,7 @@ impl Scope {
 }
 
 /// The endpoint a web claim is about and which of its exchanges, or `None` for a
-/// claim about snapshots.
+/// claim about snapshots or binaries.
 fn scope(claim: &ClaimKind) -> Option<(&str, Scope)> {
     match claim {
         ClaimKind::StatusSet(c) => Some((&c.endpoint, Scope::Answered)),
@@ -857,7 +935,8 @@ fn scope(claim: &ClaimKind) -> Option<(&str, Scope)> {
         | ClaimKind::RecordArray(_)
         | ClaimKind::FieldRelation(_)
         | ClaimKind::TaggedRecords(_)
-        | ClaimKind::StringTable(_) => None,
+        | ClaimKind::StringTable(_)
+        | ClaimKind::CallEdge(_) => None,
     }
 }
 
@@ -969,6 +1048,104 @@ pub fn har_exchanges(bytes: &[u8]) -> Option<Vec<HttpExchange>> {
     Some(har.log.entries.into_iter().map(exchange).collect())
 }
 
+/// The parts of a Rizin export (`scripts/rizin-facts.sh`) that become evidence.
+#[derive(serde::Deserialize)]
+struct RizinExport {
+    tool: String,
+    hashes: RizinHashes,
+    functions: Vec<RizinFunction>,
+    #[serde(default)]
+    imports: Vec<RizinImport>,
+    #[serde(default)]
+    relocs: Vec<RizinReloc>,
+}
+
+#[derive(serde::Deserialize)]
+struct RizinHashes {
+    sha256: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RizinFunction {
+    offset: u64,
+    name: String,
+    #[serde(default)]
+    callrefs: Vec<RizinRef>,
+}
+
+#[derive(serde::Deserialize)]
+struct RizinRef {
+    to: u64,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RizinImport {
+    name: String,
+    /// The stub or table slot calls to the import go through, where the format has one.
+    plt: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct RizinReloc {
+    name: Option<String>,
+    vaddr: u64,
+}
+
+/// The functions and direct calls in a Rizin export, or `None` if the bytes are not
+/// one. A jump to another function or to an import is a tail call and counts as a
+/// call; a jump inside a function does not.
+#[must_use]
+pub fn rizin_facts(bytes: &[u8]) -> Option<BinaryFacts> {
+    let export: RizinExport = serde_json::from_slice(bytes).ok()?;
+    let imported: BTreeSet<&str> = export.imports.iter().map(|i| i.name.as_str()).collect();
+    // A call reaches an import through a stub function, a table slot or a relocated
+    // pointer, depending on the file format and how the binary was linked.
+    let stubs = (export.functions.iter())
+        .filter_map(|f| Some((f.offset, f.name.strip_prefix("sym.imp.")?.to_owned())));
+    let slots = (export.imports.iter()).filter_map(|i| Some((i.plt?, i.name.clone())));
+    let relocs = export.relocs.iter().filter_map(|r| {
+        let name = r.name.as_deref().filter(|name| imported.contains(name))?;
+        Some((r.vaddr, name.to_owned()))
+    });
+    let mut imports: BTreeMap<u64, String> = stubs.chain(slots).chain(relocs).collect();
+    let starts: BTreeSet<u64> = export.functions.iter().map(|f| f.offset).collect();
+    let function = |f: RizinFunction| {
+        let leaves =
+            |to: u64| to != f.offset && (starts.contains(&to) || imports.contains_key(&to));
+        let called = |r: &RizinRef| r.kind == "CALL" || (r.kind == "CODE" && leaves(r.to));
+        Function {
+            address: f.offset,
+            name: f.name,
+            calls: (f.callrefs.iter().filter(|r| called(r)))
+                .map(|r| r.to)
+                .collect(),
+        }
+    };
+    let functions: Vec<Function> = export.functions.into_iter().map(function).collect();
+    // Only imports something calls are kept: the rest cannot be the callee of a claim that holds.
+    let called: BTreeSet<u64> = functions.iter().flat_map(|f| &f.calls).copied().collect();
+    imports.retain(|at, _| called.contains(at));
+    Some(BinaryFacts {
+        tool: export.tool,
+        sha256: export.hashes.sha256,
+        functions,
+        imports,
+    })
+}
+
+/// The evidence as what a tool recovered from a binary.
+fn facts(evidence: &[Raw<'_>]) -> Result<Vec<Item<BinaryFacts>>, CheckError> {
+    let parse = |bytes| serde_json::from_slice(bytes).map_err(|e| e.to_string());
+    decode(
+        EvidenceKind::BinaryFacts,
+        MAX_PARSED_EVIDENCE,
+        evidence,
+        parse,
+    )
+}
+
 /// The evidence as memory snapshots, which are only sliced, never parsed.
 fn snapshots<'e>(evidence: &[Raw<'e>]) -> Result<Vec<Item<&'e [u8]>>, CheckError> {
     decode(EvidenceKind::MemorySnapshot, usize::MAX, evidence, Ok)
@@ -1010,6 +1187,7 @@ pub fn check_claim(
     limit: Duration,
 ) -> Result<Verdict, CheckError> {
     match claim {
+        ClaimKind::CallEdge(c) => run(&CallEdgeChecker, id, c, facts(evidence), limit),
         ClaimKind::ResponseHeader(c) => run(
             &ResponseHeaderChecker,
             id,
@@ -1970,6 +2148,85 @@ mod tests {
         placed[1].offset = 5;
         placed[1].len = 3;
         assert_eq!(refuted(&[layout(placed)], kind, &headers)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn call_edges_replay_on_a_rizin_export() -> Result<(), Box<dyn std::error::Error>> {
+        // What `scripts/rizin-facts.sh` writes, cut down to two functions. `main` calls
+        // an import through its relocation, calls a function, jumps inside itself, and
+        // ends by jumping to another import.
+        let export = br#"{"tool":"rizin 0.9.1 (aaa)","hashes":{"sha256":"31"},"functions":[
+            {"offset":9344,"name":"main","size":262,"callrefs":[
+                {"from":9350,"to":40864,"type":"CALL"},
+                {"from":9360,"to":9616,"type":"CALL"},
+                {"from":9370,"to":9400,"type":"CODE"},
+                {"from":9380,"to":40900,"type":"CODE"}]},
+            {"offset":9616,"name":"fcn.00002590","callrefs":[]}],
+            "imports":[{"ordinal":1,"name":"setlocale"},{"ordinal":2,"name":"free"},{"name":"exit"}],
+            "relocs":[{"name":"setlocale","vaddr":40864},{"name":"free","vaddr":40568},
+                {"name":"exit","vaddr":40900}]}"#;
+        let facts = rizin_facts(export).ok_or("not a Rizin export")?;
+        // Only imports that are called are kept.
+        assert_eq!(
+            facts.imports.into_iter().collect::<Vec<_>>(),
+            [(40864, "setlocale".to_owned()), (40900, "exit".to_owned())]
+        );
+        let stored = serde_json::to_vec(&rizin_facts(export).ok_or("not a Rizin export")?)?;
+        // Stored facts are not mistaken for an export to import again.
+        assert!(rizin_facts(&stored).is_none());
+        let check = |caller, callee, kind| {
+            let claim = ClaimKind::CallEdge(ledger_core::CallEdge {
+                binary: "true".into(),
+                caller,
+                callee,
+            });
+            let evidence = (EvidenceId::of(&stored), kind, &stored[..]);
+            check_claim(
+                &ClaimId::of(b"c"),
+                &claim,
+                &[evidence],
+                Duration::from_secs(5),
+            )
+        };
+        let detail = |caller, callee| match check(caller, callee, EvidenceKind::BinaryFacts) {
+            Ok(Verdict::Held { .. }) => Ok(String::from("held")),
+            Ok(Verdict::Refuted { counterexample }) => Ok(counterexample.detail),
+            other => Err(format!("{other:?}")),
+        };
+        let named = |name: &str| FunctionRef::Name(name.into());
+        let at = FunctionRef::Address;
+        assert_eq!(detail(named("main"), named("setlocale"))?, "held");
+        assert_eq!(detail(at(9344), at(9616))?, "held");
+        assert_eq!(detail(at(9344), named("fcn.00002590"))?, "held");
+        // A jump out to an import is a tail call. A jump inside the function is not a
+        // call, and an import nothing calls is not a callee.
+        assert_eq!(detail(named("main"), named("exit"))?, "held");
+        assert_eq!(
+            detail(named("main"), at(9400))?,
+            "`main` at 0x2480 does not call the function at 0x24b8 directly; its 3 direct calls go to: fcn.00002590, setlocale, exit"
+        );
+        assert_eq!(
+            detail(named("main"), named("free"))?,
+            "`free` is neither a recovered function nor an import that is called"
+        );
+        assert_eq!(
+            detail(named("fcn.00002590"), named("main"))?,
+            "`fcn.00002590` at 0x2590 does not call `main` directly; it makes no direct calls"
+        );
+        // A function the tool did not recover is not evidence against a call from it.
+        assert!(matches!(
+            check(at(9345), named("main"), EvidenceKind::BinaryFacts),
+            Err(CheckError::NotApplicable(..))
+        ));
+        assert!(matches!(
+            check(
+                named("main"),
+                named("setlocale"),
+                EvidenceKind::MemorySnapshot
+            ),
+            Err(CheckError::WrongEvidence(EvidenceKind::MemorySnapshot))
+        ));
         Ok(())
     }
 
