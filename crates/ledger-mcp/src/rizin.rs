@@ -7,12 +7,15 @@ use std::time::Duration;
 
 use ledger_checkers::RIZIN_COMMANDS;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 
 use crate::tools::Rejection;
 
 const PROGRAM: &str = "rizin";
 /// Longest one analysis may take. Rizin is stopped when it runs out.
 const LIMIT: Duration = Duration::from_secs(600);
+/// One analysis runs at a time, since each can take minutes and much of the memory.
+static TURN: Semaphore = Semaphore::const_new(1);
 
 /// What one run of Rizin printed, and which Rizin it was.
 pub struct Analysis {
@@ -62,6 +65,21 @@ pub async fn analyse(path: String) -> Result<Option<Analysis>, Rejection> {
     if !program {
         return Ok(None);
     }
+    // Others wait for this turn to end, so the limit covers both runs and starts only now.
+    let closed = |e: tokio::sync::AcquireError| reject("tool_failed", format!("{e}."), FAILED);
+    let _turn = TURN.acquire().await.map_err(closed)?;
+    let deadline = tokio::time::Instant::now() + LIMIT;
+    let out_of_time = |_: tokio::time::error::Elapsed| {
+        let message = format!(
+            "Rizin did not finish within {} seconds and was stopped.",
+            LIMIT.as_secs()
+        );
+        reject(
+            "tool_timeout",
+            message,
+            "Nothing was recorded. Tell the human: this program needs a longer limit or a lighter analysis.",
+        )
+    };
     let missing = |e: std::io::Error| {
         reject(
             "tool_missing",
@@ -72,8 +90,10 @@ pub async fn analyse(path: String) -> Result<Option<Analysis>, Rejection> {
     let version = Command::new(PROGRAM)
         .arg("-v")
         .stdin(Stdio::null())
+        .kill_on_drop(true)
         .output();
-    let version = version.await.map_err(missing)?;
+    let version = tokio::time::timeout_at(deadline, version).await;
+    let version = version.map_err(out_of_time)?.map_err(missing)?;
     let tool = String::from_utf8_lossy(&version.stdout);
     let tool = tool.lines().next().unwrap_or(PROGRAM).trim().to_owned();
     // The path is absolute, so Rizin cannot read it as an option or as one of its
@@ -87,18 +107,8 @@ pub async fn analyse(path: String) -> Result<Option<Analysis>, Rejection> {
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .output();
-    let Ok(ran) = tokio::time::timeout(LIMIT, run).await else {
-        let message = format!(
-            "Rizin did not finish within {} seconds and was stopped.",
-            LIMIT.as_secs()
-        );
-        return Err(reject(
-            "tool_timeout",
-            message,
-            "Nothing was recorded. Tell the human: this program needs a longer limit or a lighter analysis.",
-        ));
-    };
-    let ran = ran.map_err(missing)?;
+    let ran = tokio::time::timeout_at(deadline, run).await;
+    let ran = ran.map_err(out_of_time)?.map_err(missing)?;
     if !ran.status.success() {
         return Err(reject(
             "tool_failed",
@@ -132,6 +142,22 @@ mod tests {
         // Tests run in the crate's directory, so this path is relative.
         let (path, program) = locate(Path::new("Cargo.toml"))?;
         assert!(program && path.is_absolute(), "{}", path.display());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_analysis_waits_while_another_runs() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let program = dir.path().join("program");
+        std::fs::write(&program, b"\x7fELF")?;
+        let path = program.to_str().ok_or("path")?.to_owned();
+        let running = TURN.acquire().await?;
+        let waited = tokio::time::timeout(Duration::from_millis(500), analyse(path)).await;
+        let finished = waited
+            .ok()
+            .map(|r| r.map(|ran| ran.map(|a| a.tool)).map_err(|r| r.to_string()));
+        assert!(finished.is_none(), "it did not wait: {finished:?}");
+        drop(running);
         Ok(())
     }
 }
