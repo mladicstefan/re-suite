@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "header(200, serde_json::json!({\"pattern\": \"max-age=\"})).sentence()"
+---
+200 responses to `GET /{page}` carry header `strict-transport-security` with a value matching JSON Schema 2bbb766a.

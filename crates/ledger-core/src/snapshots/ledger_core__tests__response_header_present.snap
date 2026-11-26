@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "header(404, serde_json::json!(true)).sentence()"
+---
+404 responses to `GET /{page}` carry header `strict-transport-security`.

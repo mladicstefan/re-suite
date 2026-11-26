@@ -411,9 +411,52 @@ impl StringTable {
     }
 }
 
+/// Responses with one status from an endpoint carry a header whose value matches a JSON Schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResponseHeader {
+    /// `METHOD [host]/path`, see [`Endpoint`].
+    pub endpoint: String,
+    /// The response status the claim is about.
+    pub status: u16,
+    pub header: String,
+    /// A JSON Schema for the header's value, which is a string. `true` claims only
+    /// that the header is sent. If the header is sent more than once, one matching line is enough.
+    pub value: serde_json::Value,
+}
+
+impl ResponseHeader {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        let value = match &self.value {
+            serde_json::Value::Bool(true) => String::new(),
+            schema => format!(
+                " with a value matching JSON Schema {}",
+                schema_print(schema)
+            ),
+        };
+        format!(
+            "{} responses to `{}` carry header `{}`{value}.",
+            self.status, self.endpoint, self.header
+        )
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        Endpoint::parse(&self.endpoint).map_err(String::from)?;
+        let schema = self.value.is_object() || self.value.is_boolean();
+        if self.header.is_empty() || !schema || !(100..600).contains(&self.status) {
+            return Err(String::from(
+                "a response header claim needs a header name, a status of 100 to 599 and an object or boolean schema for the value",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimKind {
+    ResponseHeader(ResponseHeader),
     StringTable(StringTable),
     TaggedRecords(TaggedRecords),
     FieldRelation(FieldRelation),
@@ -448,6 +491,7 @@ impl Claim {
     #[must_use]
     pub const fn subject(&self) -> &str {
         match &self.kind {
+            ClaimKind::ResponseHeader(h) => h.endpoint.as_str(),
             ClaimKind::StringTable(t) => t.type_name.as_str(),
             ClaimKind::TaggedRecords(t) => t.type_name.as_str(),
             ClaimKind::FieldRelation(r) => r.type_name.as_str(),
@@ -481,6 +525,7 @@ impl Claim {
     #[must_use]
     pub fn sentence(&self) -> String {
         match &self.kind {
+            ClaimKind::ResponseHeader(c) => c.sentence(),
             ClaimKind::StringTable(c) => c.sentence(),
             ClaimKind::TaggedRecords(c) => c.sentence(),
             ClaimKind::FieldRelation(c) => c.sentence(),
@@ -908,6 +953,7 @@ impl ResponseSchema {
 /// `CoreError::Inadmissible` with the reason.
 pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
     let admissible = match &claim.kind {
+        ClaimKind::ResponseHeader(c) => c.admissible(),
         ClaimKind::StringTable(c) => c.admissible(),
         ClaimKind::TaggedRecords(c) => c.admissible(),
         ClaimKind::FieldRelation(c) => c.admissible(),
@@ -1828,6 +1874,30 @@ mod tests {
         );
         assert_eq!(l.revised_from(&first_id), None, "only earlier claims count");
         Ok(())
+    }
+
+    #[test]
+    fn response_header_sentence_and_admission() {
+        let header = |status, value| Claim {
+            kind: ClaimKind::ResponseHeader(ResponseHeader {
+                endpoint: "GET /{page}".into(),
+                status,
+                header: "strict-transport-security".into(),
+                value,
+            }),
+            premises: BTreeSet::new(),
+        };
+        insta::assert_snapshot!(
+            "response_header",
+            header(200, serde_json::json!({"pattern": "max-age="})).sentence()
+        );
+        insta::assert_snapshot!(
+            "response_header_present",
+            header(404, serde_json::json!(true)).sentence()
+        );
+        assert!(admit(header(200, serde_json::json!(true))).is_ok());
+        assert!(admit(header(99, serde_json::json!(true))).is_err());
+        assert!(admit(header(200, serde_json::json!("not a schema"))).is_err());
     }
 
     #[test]

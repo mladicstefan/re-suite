@@ -727,11 +727,50 @@ impl<'e> Checker<'e> for StringTableChecker {
     }
 }
 
+pub struct ResponseHeaderChecker;
+
+impl Checker<'_> for ResponseHeaderChecker {
+    const ID: &'static str = "response_header";
+    const VERSION: u32 = 1;
+    type Claim = ledger_core::ResponseHeader;
+    type Evidence = HttpExchange;
+
+    fn check(
+        &self,
+        claim: &Self::Claim,
+        evidence: &[Item<HttpExchange>],
+        deadline: Instant,
+    ) -> Result<Verdict, CheckError> {
+        let value = jsonschema::validator_for(&claim.value)
+            .map_err(|e| CheckError::InvalidClaim(e.to_string()))?;
+        Ok(replay(evidence, deadline, |exchange| {
+            let headers = exchange.response.as_ref().map_or(&[][..], |r| &r.headers);
+            let mut lines = (headers.iter()).filter(|h| h.name.eq_ignore_ascii_case(&claim.header));
+            let mut sent = false;
+            // A header can be sent several times; one line that matches is enough.
+            let matched = lines.any(|h| {
+                sent = true;
+                value.is_valid(&serde_json::Value::String(h.value.clone()))
+            });
+            // The value can be a cookie or a token, so the counterexample does not quote it.
+            match (matched, sent) {
+                (true, _) => Ok(()),
+                (false, true) => Err(format!(
+                    "header `{}` is sent, but its value does not match the schema",
+                    claim.header
+                )),
+                (false, false) => Err(format!("header `{}` missing", claim.header)),
+            }
+        }))
+    }
+}
+
 /// The checker that `check_claim` runs for a claim, by id and version. With the
 /// claim and the evidence, this is what a recorded verdict is cached on.
 #[must_use]
 pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
     let (id, version) = match claim {
+        ClaimKind::ResponseHeader(_) => (ResponseHeaderChecker::ID, ResponseHeaderChecker::VERSION),
         ClaimKind::StringTable(_) => (StringTableChecker::ID, StringTableChecker::VERSION),
         ClaimKind::TaggedRecords(_) => (TaggedRecordsChecker::ID, TaggedRecordsChecker::VERSION),
         ClaimKind::FieldRelation(_) => (RelationChecker::ID, RelationChecker::VERSION),
@@ -813,6 +852,7 @@ fn scope(claim: &ClaimKind) -> Option<(&str, Scope)> {
         ClaimKind::RequestHeader(c) => Some((&c.endpoint, Scope::Any)),
         ClaimKind::RequestSignature(c) => Some((&c.endpoint, Scope::Accepted)),
         ClaimKind::ResponseSchema(c) => Some((&c.endpoint, Scope::Status(c.status))),
+        ClaimKind::ResponseHeader(c) => Some((&c.endpoint, Scope::Status(c.status))),
         ClaimKind::MemoryLayout(_)
         | ClaimKind::RecordArray(_)
         | ClaimKind::FieldRelation(_)
@@ -970,6 +1010,13 @@ pub fn check_claim(
     limit: Duration,
 ) -> Result<Verdict, CheckError> {
     match claim {
+        ClaimKind::ResponseHeader(c) => run(
+            &ResponseHeaderChecker,
+            id,
+            c,
+            exchanges(evidence, claim),
+            limit,
+        ),
         ClaimKind::StringTable(c) => run(&StringTableChecker, id, c, snapshots(evidence), limit),
         ClaimKind::TaggedRecords(c) => {
             run(&TaggedRecordsChecker, id, c, snapshots(evidence), limit)
@@ -1751,6 +1798,61 @@ mod tests {
             detail(&claim(None, 2, 0), binary),
             "string 1 is not printable text"
         );
+    }
+
+    #[test]
+    fn response_header_claims_hold_refute_and_keep_the_value_out() -> Result<(), CheckError> {
+        let claim = |header: &str, value: serde_json::Value| ledger_core::ResponseHeader {
+            endpoint: "POST /login".into(),
+            status: 200,
+            header: header.into(),
+            value,
+        };
+        let mut capture = exchange("/login", ("a", "b"), "", 200, &serde_json::json!({}));
+        if let Some(response) = &mut capture.response {
+            let line = |name: &str, value: &str| Header {
+                name: name.into(),
+                value: value.into(),
+            };
+            response.headers = vec![
+                line("Set-Cookie", "theme=dark"),
+                line("set-cookie", "session=s3cret; HttpOnly"),
+                line("Strict-Transport-Security", "max-age=63072000"),
+            ];
+        }
+        let verdict =
+            |claim| ResponseHeaderChecker.check(&claim, &[item(b"e", capture.clone())], soon());
+        assert!(matches!(
+            verdict(claim(
+                "strict-transport-security",
+                serde_json::json!({"pattern": "^max-age="})
+            ))?,
+            Verdict::Held { .. }
+        ));
+        // Two cookies are set; the claim holds if one of them matches.
+        assert!(matches!(
+            verdict(claim(
+                "set-cookie",
+                serde_json::json!({"pattern": "HttpOnly"})
+            ))?,
+            Verdict::Held { .. }
+        ));
+        let Verdict::Refuted { counterexample } = verdict(claim(
+            "set-cookie",
+            serde_json::json!({"pattern": "Secure"}),
+        ))?
+        else {
+            return Err(CheckError::InvalidClaim("expected a refutation".into()));
+        };
+        assert!(
+            !counterexample.detail.contains("s3cret"),
+            "{}",
+            counterexample.detail
+        );
+        assert!(
+            matches!(verdict(claim("x-frame-options", serde_json::json!(true)))?, Verdict::Refuted { counterexample } if counterexample.detail.ends_with("missing"))
+        );
+        Ok(())
     }
 
     /// A made-up save header: magic, version 113, a size, a float time, a map name,

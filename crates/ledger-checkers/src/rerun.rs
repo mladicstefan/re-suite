@@ -89,6 +89,7 @@ fn claim_subject(kind: &ClaimKind) -> &str {
         ClaimKind::RequestHeader(c) => &c.endpoint,
         ClaimKind::RequestBodySchema(c) => &c.endpoint,
         ClaimKind::ResponseSchema(c) => &c.endpoint,
+        ClaimKind::ResponseHeader(c) => &c.endpoint,
         ClaimKind::StatusSet(c) => &c.endpoint,
     }
 }
@@ -168,6 +169,7 @@ fn with_endpoint(kind: &ClaimKind, endpoint: String) -> Option<ClaimKind> {
         ClaimKind::RequestHeader(c) => c.endpoint = endpoint,
         ClaimKind::RequestBodySchema(c) => c.endpoint = endpoint,
         ClaimKind::ResponseSchema(c) => c.endpoint = endpoint,
+        ClaimKind::ResponseHeader(c) => c.endpoint = endpoint,
         ClaimKind::StatusSet(c) => c.endpoint = endpoint,
         _ => return None,
     }

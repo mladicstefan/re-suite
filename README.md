@@ -41,7 +41,7 @@ verdict  held on 6 captures
 
 ## Claim kinds
 
-A claim is one of ten typed statements. Each has an admission rule, a sentence, and a
+A claim is one of eleven typed statements. Each has an admission rule, a sentence, and a
 checker that replays it on saved evidence.
 
 | Kind | Says | Checked on |
@@ -55,6 +55,7 @@ checker that replays it on saved evidence.
 | `request_header` | requests carry a header whose value matches a schema | HTTP exchanges |
 | `request_body_schema` | request bodies match a JSON Schema | HTTP exchanges |
 | `response_schema` | responses with one status match a JSON Schema | HTTP exchanges |
+| `response_header` | responses with one status carry a header whose value matches a schema | HTTP exchanges |
 | `status_set` | an endpoint only answers with the listed statuses | HTTP exchanges |
 
 Toolchain: Rust 1.100.0 (pinned in `rust-toolchain.toml`), edition 2024, resolver 3.
