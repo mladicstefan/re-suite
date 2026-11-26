@@ -8,6 +8,7 @@ publish = false
 anyhow = "1.0.105"
 ledger-checkers = { version = "0.1.0", path = "../ledger-checkers" }
 ledger-core = { version = "0.1.0", path = "../ledger-core" }
+ledger-os = { version = "0.1.0", path = "../ledger-os" }
 ledger-store = { version = "0.1.0", path = "../ledger-store" }
 rmcp = { version = "3.11.0", features = ["server", "macros", "transport-io"] }
 schemars = "1.2.3"

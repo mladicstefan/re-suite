@@ -10,6 +10,7 @@ target; all checks replay captures.
 
 ## Crate map
 - `crates/ledger-core`: pure sync model (claims, `admit`, events, verdicts, derived status). No IO.
+- `crates/ledger-os`: everything that differs by operating system, picked at compile time. No other crate uses `#[cfg]` on the system or `std::os`.
 - `crates/ledger-store`: SQLite WAL, single writer thread with group commit, published snapshots, append-only events, evidence files by hash.
 - `crates/ledger-checkers`: offline checkers behind the `Checker` trait.
 - `crates/ledger-mcp`: stdio MCP server (propose, ask, explain, add_evidence, retract). Only crate with tokio.

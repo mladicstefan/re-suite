@@ -2,11 +2,8 @@
 //! an append-only event log, a published in-memory snapshot for readers and an
 //! index of evidence files that live on disk under their content hash.
 
-use std::fs::{self, File};
-use std::io::Write;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::thread::JoinHandle;
 
@@ -83,7 +80,7 @@ pub struct Snapshot {
 
 /// Evidence bytes, memory-mapped and checked against their hash.
 #[derive(Debug)]
-pub struct Evidence(memmap2::Mmap);
+pub struct Evidence(ledger_os::Mapped);
 
 impl Deref for Evidence {
     type Target = [u8];
@@ -139,8 +136,14 @@ impl Store {
 
     fn open_with(path: &Path, synchronous: &str) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
+        // Where the system's flush stops short of the disk, FULL has to ask for a real one.
+        let durable = if synchronous == "FULL" {
+            ledger_os::SQLITE_DURABLE
+        } else {
+            ""
+        };
         conn.execute_batch(&format!(
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = {synchronous};"
+            "PRAGMA journal_mode = WAL; PRAGMA synchronous = {synchronous}; {durable}"
         ))?;
         let objects = "SELECT count(*) FROM sqlite_master";
         if conn.query_one(objects, [], |r| r.get::<_, i64>(0))? == 0 {
@@ -156,7 +159,7 @@ impl Store {
         }
         let live = Arc::new(load(&conn)?);
         let evidence_dir = sidecar(path, ".evidence");
-        fs::create_dir_all(&evidence_dir)?;
+        ledger_os::create_private_dir(&evidence_dir)?;
         let published = Arc::new(RwLock::new(Arc::clone(&live)));
         let (tx, rx) = flume::bounded(QUEUE);
         let writer = Writer {
@@ -226,18 +229,15 @@ impl Store {
     /// # Errors
     /// The file or the index cannot be written.
     pub fn add_evidence(&self, kind: EvidenceKind, bytes: &[u8]) -> Result<EvidenceId, StoreError> {
-        static TEMP: AtomicU64 = AtomicU64::new(0);
         let id = EvidenceId::of(bytes);
+        // The file is whole and on the disk under its hash before the event that names
+        // it is written; concurrent adds of the same bytes cannot tear each other.
         let file = self.evidence_dir.join(id.as_str());
-        if !file.exists() {
-            // Own temporary name, sync, rename: the hash-named file is whole or absent, even
-            // after a crash, and concurrent adds of the same bytes cannot tear each other.
-            let n = TEMP.fetch_add(1, Ordering::Relaxed);
-            let tmp = file.with_extension(format!("{}-{n}.tmp", std::process::id()));
-            let mut f = File::create(&tmp)?;
-            f.write_all(bytes)?;
-            f.sync_all()?;
-            fs::rename(&tmp, &file)?;
+        // Evidence that is indexed had its file flushed before its event was written, so
+        // adding it again costs no flush. A file someone deleted is still put back.
+        let known = self.snapshot().ledger.evidence_kind(&id).is_some();
+        if !(known && file.exists()) {
+            ledger_os::write_once(&file, bytes)?;
         }
         let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
         // An exchange that does not parse is still stored; its checker will say what is wrong.
@@ -292,7 +292,7 @@ impl Store {
     ) -> Result<EvidenceId, StoreError> {
         // SAFETY: a capture handed over as evidence is a finished file. Another process
         // truncating it while we hash and copy it could fault the read.
-        let map = unsafe { memmap2::Mmap::map(&File::open(path)?)? };
+        let map = unsafe { ledger_os::map(path.as_ref())? };
         self.add_evidence(kind, &map)
     }
 
@@ -322,14 +322,13 @@ fn read_evidence(dir: &Path, id: &EvidenceId) -> Result<Option<Evidence>, StoreE
     if !id.as_str().bytes().all(|b| b.is_ascii_hexdigit()) {
         return Ok(None);
     }
-    let file = match File::open(dir.join(id.as_str())) {
-        Ok(file) => file,
+    // SAFETY: evidence files are written once under a temporary name, renamed into
+    // place and never modified afterwards.
+    let map = match unsafe { ledger_os::map(&dir.join(id.as_str())) } {
+        Ok(map) => map,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    // SAFETY: evidence files are written once under a temporary name, renamed into
-    // place and never modified afterwards.
-    let map = unsafe { memmap2::Mmap::map(&file)? };
     if EvidenceId::of(&map) != *id {
         return Err(StoreError::Corrupt(id.clone()));
     }
@@ -537,8 +536,10 @@ mod tests {
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
+    use std::fs;
     use std::num::NonZeroU64;
     use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 

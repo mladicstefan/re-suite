@@ -41,7 +41,7 @@ fn unreadable(e: &std::io::Error) -> Rejection {
 /// The file's absolute path, and whether it is a program to analyse. Facts that
 /// were exported before are JSON and start with a brace; no program does.
 fn locate(path: &Path) -> std::io::Result<(PathBuf, bool)> {
-    let path = std::fs::canonicalize(path)?;
+    let path = ledger_os::absolute(path)?;
     let mut first = [0u8; 1];
     let read = std::fs::File::open(&path)?.read(&mut first)?;
     Ok((path, read == 0 || first[0] != b'{'))

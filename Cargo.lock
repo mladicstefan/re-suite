@@ -1009,6 +1009,7 @@ dependencies = [
  "insta",
  "ledger-checkers",
  "ledger-core",
+ "ledger-os",
  "ledger-store",
  "rmcp",
  "schemars",
@@ -1019,13 +1020,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ledger-os"
+version = "0.1.0"
+dependencies = [
+ "memmap2",
+ "tempfile",
+]
+
+[[package]]
 name = "ledger-store"
 version = "0.1.0"
 dependencies = [
  "flume",
  "jiff",
  "ledger-core",
- "memmap2",
+ "ledger-os",
  "proptest",
  "rusqlite",
  "serde_json",

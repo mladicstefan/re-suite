@@ -60,8 +60,14 @@ Every new `ClaimKind` variant needs all four, in the same change:
 - Anything that differs by operating system (memory mapping, file locking,
   flush calls, process and memory limits, sandboxing) goes in a crate of its
   own, never inline in the core, the store, the checkers or the server.
-- That crate selects the system's functions at compile time with `#[cfg(...)]`
-  and exposes one portable API. No run-time checks of the operating system.
+- That crate is `crates/ledger-os`. It selects the system's functions at
+  compile time with `#[cfg(...)]` and exposes one portable API. No run-time
+  checks of the operating system.
+- No other crate uses `#[cfg]` on the system, `std::os` or a crate that wraps
+  system calls (memmap2 and the like). Add what you need to `ledger-os`.
+- A change there must still compile for the other systems:
+  `cargo clippy -p ledger-os --target x86_64-pc-windows-gnu -- -D warnings`,
+  and the same for `aarch64-apple-darwin`.
 
 ## IO is never skipped
 - Blocking work (SQLite, hashing, file IO, checks) never runs on the async
