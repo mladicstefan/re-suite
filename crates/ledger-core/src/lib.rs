@@ -1079,6 +1079,10 @@ pub struct Function {
     /// The addresses it calls directly, or ends by jumping to (a tail call).
     #[serde(default)]
     pub calls: BTreeSet<u64>,
+    /// Other functions it jumps to that nothing calls. Such a jump is a tail call, or a
+    /// jump inside one function that the tool split in two; the tool cannot tell which.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub jumps: BTreeSet<u64>,
 }
 
 /// Evidence format for `EvidenceKind::BinaryFacts`: the functions and direct calls a

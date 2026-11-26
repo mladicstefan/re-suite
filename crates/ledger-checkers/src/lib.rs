@@ -768,9 +768,75 @@ impl Checker<'_> for ResponseHeaderChecker {
 
 pub struct CallEdgeChecker;
 
+/// What one analysis says about a claimed call.
+enum Edge {
+    Calls,
+    /// The caller jumps to the callee and nothing calls the callee: a tail call, or a
+    /// jump inside one function that the analysis split in two.
+    Jumps,
+    /// Neither, with what the caller does call.
+    Neither(String),
+}
+
+fn refers(f: &Function, wanted: &FunctionRef) -> bool {
+    match wanted {
+        FunctionRef::Address(at) => f.address == *at,
+        FunctionRef::Name(name) => f.name == *name,
+    }
+}
+
+fn call_edge(claim: &ledger_core::CallEdge, facts: &BinaryFacts) -> Edge {
+    let functions = facts.functions.iter();
+    let Some(caller) = functions.clone().find(|f| refers(f, &claim.caller)) else {
+        return Edge::Neither(format!("{} is not in the recovered code", claim.caller));
+    };
+    // A name can stand for a recovered function or for an imported symbol.
+    let mut targets: Vec<u64> = (functions.clone().filter(|f| refers(f, &claim.callee)))
+        .map(|f| f.address)
+        .collect();
+    match &claim.callee {
+        FunctionRef::Address(at) => targets.push(*at),
+        FunctionRef::Name(name) => {
+            let imported = facts.imports.iter().filter(|(_, import)| *import == name);
+            targets.extend(imported.map(|(at, _)| *at));
+        }
+    }
+    if targets.is_empty() {
+        return Edge::Neither(format!(
+            "{} is neither a recovered function nor an import that is called",
+            claim.callee
+        ));
+    }
+    if caller.calls.iter().any(|to| targets.contains(to)) {
+        return Edge::Calls;
+    }
+    if caller.jumps.iter().any(|to| targets.contains(to)) {
+        return Edge::Jumps;
+    }
+    let name_of = |to: &u64| {
+        let function = || functions.clone().find(|f| f.address == *to);
+        let name = (facts.imports.get(to).cloned()).or_else(|| function().map(|f| f.name.clone()));
+        name.unwrap_or_else(|| format!("{to:#x}"))
+    };
+    let calls: Vec<String> = caller.calls.iter().map(name_of).collect();
+    let made = if calls.is_empty() {
+        String::from("it makes no direct calls")
+    } else {
+        format!(
+            "its {} direct calls go to: {}",
+            calls.len(),
+            calls.join(", ")
+        )
+    };
+    Edge::Neither(format!(
+        "`{}` at {:#x} does not call {} directly; {made}",
+        caller.name, caller.address, claim.callee
+    ))
+}
+
 impl Checker<'_> for CallEdgeChecker {
     const ID: &'static str = "call_edge";
-    const VERSION: u32 = 1;
+    const VERSION: u32 = 2;
     type Claim = ledger_core::CallEdge;
     type Evidence = BinaryFacts;
 
@@ -780,65 +846,31 @@ impl Checker<'_> for CallEdgeChecker {
         evidence: &[Item<BinaryFacts>],
         deadline: Instant,
     ) -> Result<Verdict, CheckError> {
-        let is = |f: &&Function, wanted: &FunctionRef| match wanted {
-            FunctionRef::Address(at) => f.address == *at,
-            FunctionRef::Name(name) => f.name == *name,
-        };
         // An analysis that did not recover the caller does not know what it calls, so it
         // cannot refute the claim: tools miss functions that are there.
-        let recovered = |facts: &BinaryFacts| facts.functions.iter().any(|f| is(&f, &claim.caller));
+        let recovered =
+            |facts: &BinaryFacts| facts.functions.iter().any(|f| refers(f, &claim.caller));
         if let Some(blind) = evidence.iter().find(|it| !recovered(&it.data)) {
             return Err(CheckError::NotApplicable(
                 blind.id.clone(),
                 format!("an analysis that did not recover {}", claim.caller),
             ));
         }
-        Ok(replay(evidence, deadline, |facts| {
-            let functions = facts.functions.iter();
-            let Some(caller) = functions.clone().find(|f| is(f, &claim.caller)) else {
-                return Err(format!("{} is not in the recovered code", claim.caller));
-            };
-            // A name can stand for a recovered function or for an imported symbol.
-            let mut targets: Vec<u64> = (functions.clone().filter(|f| is(f, &claim.callee)))
-                .map(|f| f.address)
-                .collect();
-            match &claim.callee {
-                FunctionRef::Address(at) => targets.push(*at),
-                FunctionRef::Name(name) => {
-                    let imported = facts.imports.iter().filter(|(_, import)| *import == name);
-                    targets.extend(imported.map(|(at, _)| *at));
-                }
-            }
-            if targets.is_empty() {
-                return Err(format!(
-                    "{} is neither a recovered function nor an import that is called",
-                    claim.callee
-                ));
-            }
-            if caller.calls.iter().any(|to| targets.contains(to)) {
-                return Ok(());
-            }
-            let name_of = |to: &u64| {
-                let function = || functions.clone().find(|f| f.address == *to);
-                let name =
-                    (facts.imports.get(to).cloned()).or_else(|| function().map(|f| f.name.clone()));
-                name.unwrap_or_else(|| format!("{to:#x}"))
-            };
-            let calls: Vec<String> = caller.calls.iter().map(name_of).collect();
-            let made = if calls.is_empty() {
-                String::from("it makes no direct calls")
-            } else {
-                format!(
-                    "its {} direct calls go to: {}",
-                    calls.len(),
-                    calls.join(", ")
-                )
-            };
-            Err(format!(
-                "`{}` at {:#x} does not call {} directly; {made}",
-                caller.name, caller.address, claim.callee
-            ))
-        }))
+        let verdict = replay(evidence, deadline, |facts| match call_edge(claim, facts) {
+            Edge::Neither(detail) => Err(detail),
+            Edge::Calls | Edge::Jumps => Ok(()),
+        });
+        // A jump is not a counterexample, and it is not a call either.
+        let unclear = |facts: &BinaryFacts| matches!(call_edge(claim, facts), Edge::Jumps);
+        if matches!(verdict, Verdict::Held { .. }) && evidence.iter().any(|it| unclear(&it.data)) {
+            return Ok(Verdict::Inconclusive {
+                reason: format!(
+                    "{} jumps to {}, which nothing calls: a tail call, or a jump inside one function that the analysis split in two. The export cannot tell which",
+                    claim.caller, claim.callee
+                ),
+            });
+        }
+        Ok(verdict)
     }
 }
 
@@ -1158,10 +1190,17 @@ pub fn rizin_facts(tool: &str, output: &[u8]) -> Result<BinaryFacts, String> {
         let leaves =
             |to: u64| to != f.offset && (entries.contains(&to) || imports.contains_key(&to));
         let called = |r: &RizinRef| r.kind == "CALL" || (r.kind == "CODE" && leaves(r.to));
+        // A jump to a function nothing calls is kept apart: it may be a tail call.
+        let jumped = |r: &RizinRef| {
+            r.kind == "CODE" && r.to != f.offset && starts.contains(&r.to) && !leaves(r.to)
+        };
         Function {
             address: f.offset,
             name: f.name,
             calls: (f.callrefs.iter().filter(|r| called(r)))
+                .map(|r| r.to)
+                .collect(),
+            jumps: (f.callrefs.iter().filter(|r| jumped(r)))
                 .map(|r| r.to)
                 .collect(),
         }
@@ -2248,7 +2287,8 @@ mod tests {
         let detail = |caller, callee| match check(caller, callee, EvidenceKind::BinaryFacts) {
             Ok(Verdict::Held { .. }) => Ok(String::from("held")),
             Ok(Verdict::Refuted { counterexample }) => Ok(counterexample.detail),
-            other => Err(format!("{other:?}")),
+            Ok(Verdict::Inconclusive { reason }) => Ok(format!("inconclusive: {reason}")),
+            Err(e) => Err(e.to_string()),
         };
         let named = |name: &str| FunctionRef::Name(name.into());
         let at = FunctionRef::Address;
@@ -2264,9 +2304,11 @@ mod tests {
         );
         // A jump into a piece Rizin split off is not a call either; a jump to a
         // function something calls is a tail call.
+        // A jump to a function nothing calls is a tail call or a jump inside one function
+        // that Rizin split in two. The export cannot tell, so the answer is neither.
         assert_eq!(
             detail(named("main"), named("fcn.000024c0"))?,
-            "`main` at 0x2480 does not call `fcn.000024c0` directly; its 3 direct calls go to: fcn.00002590, setlocale, exit"
+            "inconclusive: `main` jumps to `fcn.000024c0`, which nothing calls: a tail call, or a jump inside one function that the analysis split in two. The export cannot tell which"
         );
         assert_eq!(detail(at(9408), named("fcn.00002590"))?, "held");
         assert_eq!(
