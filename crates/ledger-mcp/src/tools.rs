@@ -2,14 +2,15 @@
 //! agent reads is produced here: short, paged, and stamped with the sequence
 //! number it was computed at.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use ledger_checkers::{CheckError, check_claim, checker_of};
 use ledger_core::{
-    Body, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event, EvidenceId, EvidenceKind, Header,
-    HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict, admit,
+    Body, CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event, EvidenceId,
+    EvidenceKind, Header, HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict, admit,
 };
 use ledger_store::{Snapshot, Store, StoreError};
 use schemars::JsonSchema;
@@ -223,6 +224,41 @@ fn holding(ledger: &Ledger, claim: &Claim) -> Option<String> {
     })
 }
 
+/// Checks being run right now, by what identifies them: claim, evidence and checker.
+static RUNNING: Mutex<BTreeMap<String, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+
+/// A place in line for one check. Dropping it lets the next request for the same check in,
+/// and clears the entry once nobody is waiting, whichever way the check ended.
+struct Turn {
+    key: String,
+    gate: Arc<Mutex<()>>,
+}
+
+impl Turn {
+    fn at(claim: &ClaimId, read: &BTreeSet<EvidenceId>, checker: &CheckerRef) -> Self {
+        let read: Vec<&str> = read.iter().map(EvidenceId::as_str).collect();
+        let key = format!(
+            "{claim}|{}@{}|{}",
+            checker.id,
+            checker.version,
+            read.join(",")
+        );
+        let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+        let gate = Arc::clone(running.entry(key.clone()).or_default());
+        Self { key, gate }
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+        // The table and this turn hold one reference each when nobody else is in line.
+        if Arc::strong_count(&self.gate) == 2 {
+            running.remove(&self.key);
+        }
+    }
+}
+
 /// One line saying which refuted claim this one replaces and what it gave up, if any.
 fn lineage(ledger: &Ledger, id: &ClaimId) -> Option<String> {
     let (earlier, revision) = ledger.revised_from(id)?;
@@ -320,6 +356,10 @@ pub fn propose(store: &Store, mut claim: Claim, evidence: &[String]) -> Result<S
         // An inconclusive verdict is not reused: it may only have run out of time.
         let checker = checker_of(&kind);
         let read: BTreeSet<EvidenceId> = evidence.iter().cloned().collect();
+        // Two requests for the same check share one run: the second waits here, then
+        // finds the first one's verdict recorded.
+        let turn = Turn::at(&id, &read, &checker);
+        let _mine = turn.gate.lock().unwrap_or_else(PoisonError::into_inner);
         let recorded = store.snapshot();
         let known = recorded.ledger.checked(&id, &read, &checker);
         reused = known.is_some_and(|v| !matches!(v, Verdict::Inconclusive { .. }));
@@ -1016,6 +1056,61 @@ mod tests {
             propose(&store, record(other), &evidence),
         );
         insta::assert_snapshot!("revision", log);
+        Ok(())
+    }
+
+    #[test]
+    fn identical_checks_arriving_together_run_once() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        // Large enough that reading and hashing it takes a moment, so the requests overlap.
+        let snapshot = dir.path().join("big.bin");
+        std::fs::write(&snapshot, vec![0u8; 8 << 20])?;
+        let added = add_evidence(
+            &store,
+            EvidenceKind::MemorySnapshot,
+            snapshot.to_str().ok_or("path")?,
+        )
+        .map_err(|r| r.to_string())?;
+        let evidence = [added.rsplit(' ').next().unwrap_or_default().to_owned()];
+        let claim = layout("Big", 64, &[])?;
+        let id = claim.id()?;
+        let start = std::sync::Barrier::new(8);
+        let responses: Vec<String> = std::thread::scope(|s| {
+            let asked: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        start.wait();
+                        propose(&store, claim.clone(), &evidence).unwrap_or_else(|r| r.to_string())
+                    })
+                })
+                .collect();
+            asked
+                .into_iter()
+                .map(|t| t.join().unwrap_or_default())
+                .collect()
+        });
+        assert!(
+            responses.iter().all(|r| r.contains("held")),
+            "{responses:#?}"
+        );
+        assert_eq!(
+            store.snapshot().ledger.verdicts(&id).len(),
+            1,
+            "the check ran more than once"
+        );
+        let waited = responses
+            .iter()
+            .filter(|r| r.contains("not replayed"))
+            .count();
+        assert_eq!(waited, 7, "seven requests took the first one's verdict");
+        assert!(
+            RUNNING
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .keys()
+                .all(|k| !k.starts_with(id.as_str()))
+        );
         Ok(())
     }
 

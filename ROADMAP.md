@@ -365,7 +365,7 @@ the ledger changes no status, and the write and read budgets hold.
 
 ### Phase 2: Every target type, plus version reruns
 
-- [ ] **Hardening.** Cache each check on what it read; grow to 8-10 claim
+- [x] **Hardening.** Cache each check on what it read; grow to 8-10 claim
       kinds; counterexample shrinking; checks against vacuous or weakened
       claims
 - [ ] **Version reruns.** Rerun the whole ledger on a new build, with
