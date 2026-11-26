@@ -981,6 +981,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "ledger-checkers",
+ "ledger-core",
  "ledger-store",
 ]
 

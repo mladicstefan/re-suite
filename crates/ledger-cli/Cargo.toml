@@ -7,6 +7,8 @@ publish = false
 [dependencies]
 anyhow = "1.0.105"
 clap = { version = "4.6.10", features = ["derive"] }
+ledger-checkers = { version = "0.1.0", path = "../ledger-checkers" }
+ledger-core = { version = "0.1.0", path = "../ledger-core" }
 ledger-store = { version = "0.1.0", path = "../ledger-store" }
 
 [lints]

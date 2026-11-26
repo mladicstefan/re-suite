@@ -301,23 +301,39 @@ impl Store {
     /// # Errors
     /// The file cannot be mapped, or its content no longer matches its name.
     pub fn evidence(&self, id: &EvidenceId) -> Result<Option<Evidence>, StoreError> {
-        // Ids arrive from agents; only a hex name can be one of our files.
-        if !id.as_str().bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Ok(None);
-        }
-        let file = match File::open(self.evidence_dir.join(id.as_str())) {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        // SAFETY: evidence files are written once under a temporary name, renamed into
-        // place and never modified afterwards.
-        let map = unsafe { memmap2::Mmap::map(&file)? };
-        if EvidenceId::of(&map) != *id {
-            return Err(StoreError::Corrupt(id.clone()));
-        }
-        Ok(Some(Evidence(map)))
+        read_evidence(&self.evidence_dir, id)
     }
+}
+
+/// [`Store::evidence`] for a ledger file that is not open here, such as one the
+/// CLI only reads.
+///
+/// # Errors
+/// The file cannot be mapped, or its content no longer matches its name.
+pub fn evidence_at(
+    ledger: impl AsRef<Path>,
+    id: &EvidenceId,
+) -> Result<Option<Evidence>, StoreError> {
+    read_evidence(&sidecar(ledger.as_ref(), ".evidence"), id)
+}
+
+fn read_evidence(dir: &Path, id: &EvidenceId) -> Result<Option<Evidence>, StoreError> {
+    // Ids arrive from agents; only a hex name can be one of our files.
+    if !id.as_str().bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    let file = match File::open(dir.join(id.as_str())) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    // SAFETY: evidence files are written once under a temporary name, renamed into
+    // place and never modified afterwards.
+    let map = unsafe { memmap2::Mmap::map(&file)? };
+    if EvidenceId::of(&map) != *id {
+        return Err(StoreError::Corrupt(id.clone()));
+    }
+    Ok(Some(Evidence(map)))
 }
 
 impl Drop for Store {

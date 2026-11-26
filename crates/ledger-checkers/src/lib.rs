@@ -1,5 +1,7 @@
 //! Offline checkers. Each replays one claim kind over saved evidence; none touches a live target.
 
+pub mod rerun;
+
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
