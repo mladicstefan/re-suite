@@ -498,6 +498,7 @@ honestly.
 | 3, real websites (`docs/trials/real-sites.md`) | 14 of 15; the one that held is true of the captures | 2.0, about 600 tokens of tool traffic | not measured |
 | 5, the staging site (`docs/trials/staging-site.md`) | 8 of 8 | 1.36, about 120 tokens of tool traffic | none staged |
 | 6, a binary (`docs/trials/crash-handler.md`) | 3 of 3 | 1.63, about 270 tokens of tool traffic | none staged |
+| 7, with and without the ledger (`docs/trials/ledger-loop.md`) | 0: none of 302 proposals was wrong on the evidence the ledger held | 1.0, about 310 tokens of tool traffic | 60 of 298: held on 40 files, refuted by 6,554 held out |
 
 ## 12. Not goals
 
@@ -511,7 +512,10 @@ honestly.
 
 | Question | Answer by |
 | --- | --- |
-| Does the loop cut tokens and false claims on real RE tasks? | End of Phase 1 |
+| Does the loop cut tokens and false claims on real RE tasks? **Not when the ledger holds only what the agent has already read:** on one file-format task, three runs with the ledger and three without made 20.0 and 21.3 wrong statements for 100,000 and 106,000 tokens, and the ledger refuted nothing (`docs/trials/ledger-loop.md`). Does it when the ledger holds more evidence than the agent reads, or evidence captured later? | A second run of trial 7 with that arm |
+| A verdict lists every piece of evidence its check read: 430 KB for one check on 6,554 files, and the log is replayed at every start. Should a set of evidence be recorded once and cited by its hash? | Before a ledger holds thousands of captures of one kind |
+| A snapshot claim must list its evidence ids; a web claim can say `all_captures`. What selects "every snapshot of this type"? | Phase 2, formats |
+| No snapshot claim kind can place a field at an offset that depends on a count, so six agents out of six left out everything after the first variable-length table of a format. Does Kaitai Struct close this? | Phase 2, formats |
 | A rerun ties a web claim to its endpoint and a snapshot claim to its type name, and suggests a move from a bounded search (`docs/trials/version-rerun.md`). That was tried on a simulated pair of builds only. Which anchor survives real version changes with the fewest false matches? | The first real pair of target versions |
 | RzIL lifts 96% to 98% of instructions on both, and 55% to 80% of functions in full (`docs/trials/rzil-coverage.md`). How often does it disagree with a second lifter? None is installed. | End of Phase 2 |
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |

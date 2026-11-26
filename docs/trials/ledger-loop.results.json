@@ -1,0 +1,875 @@
+[
+ {
+  "run": 1,
+  "arm": "ledger",
+  "statements": 208,
+  "hold": 187,
+  "wrong": 21,
+  "wrong_on_working_files": 0,
+  "bytes_typed_by_layouts_that_hold": 6192,
+  "tokens_reported_by_harness": 104866,
+  "tool_uses": 21,
+  "seconds": 265,
+  "new_input_tokens": 84864,
+  "output_tokens": 22142,
+  "cached_input_tokens_reread": 1631422,
+  "wrong_statements": [
+   {
+    "sentence": "The 4-byte flag at 0x0 is {\"one_of\": [0, 1]}.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `flag` at +0x0 is 5, not one of the claimed values"
+   },
+   {
+    "sentence": "The 4-byte stage at 0x17f0 is {\"uint\": {\"min\": 1, \"max\": 6}}.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `stage` at +0x17f0 is 32, outside 1 to 6"
+   },
+   {
+    "sentence": "Bytes 0x40..0x64 are always 0x0100000001000000010000000100000001000000757f0000010000000100000000000000.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 1,
+    "counterexample": "refuted by 04e2a3a0bc07: field `const_40` at +0x40 is 010000000100000001000000010000000100000000000000010000000100000000000000, not 0100000001000000010000000100000001000000757f000001000000010000000000"
+   },
+   {
+    "sentence": "Bytes 0x380..0x3c0 are always 0xffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `const_380` at +0x380 is ffffffff00000000ffffffff01000000000000000100000001000000010000000200000000000000ffffffff00000000ffffffff00000000ffffffff00000000, not ffffffff00"
+   },
+   {
+    "sentence": "Bytes 0x500..0x540 are always 0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffff.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: field `const_500` at +0x500 is 000000000100000000000000000000000000000012000000110000000000000000000000010000000000000000000000000000000d0000000c00000000000000, not 0000000000"
+   },
+   {
+    "sentence": "The u32 at 0x138 equals the u32 at 0x124 plus 15.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 26,
+    "counterexample": "refuted by 141a082d0ca9: the value at +0x138 is 18, but the sum is 19"
+   },
+   {
+    "sentence": "The u32 at 0x15c equals the u32 at 0x0 plus 0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x15c is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0x164 equals the u32 at 0x0 plus 0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x164 is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0x16c equals the u32 at 0x0 plus 0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x16c is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0x1cc equals the u32 at 0x17f0 plus -1.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x1cc is 0, but the sum is 31"
+   },
+   {
+    "sentence": "The u32 at 0x1d4 equals the u32 at 0x17f0 plus -1.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x1d4 is 0, but the sum is 31"
+   },
+   {
+    "sentence": "The u32 at 0x1dc equals the u32 at 0x17f0 plus -1.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x1dc is 0, but the sum is 31"
+   },
+   {
+    "sentence": "The u32 at 0x740 equals the u32 at 0x73c plus 0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x740 is 4, but the sum is 3"
+   },
+   {
+    "sentence": "The u32 at 0xd9c equals the u32 at 0xd80 plus 0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0xd9c is 2, but the sum is 5"
+   },
+   {
+    "sentence": "In each uniform record +0x14 is 0 or 1 and +0x18..+0x24 is zero.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: record 22: field `zero_18` at +0x18 is not zero (byte 4 is 0x01)"
+   },
+   {
+    "sentence": "In each uniform record +0x48 is 0..65535 and +0x4c is 0 or 1.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 165,
+    "counterexample": "refuted by 4e87c7f69da3: record 7: field `f4c` at +0x4c is 2, not one of the claimed values"
+   },
+   {
+    "sentence": "In each uniform record +0x50..+0x68 is zero.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: record 1: field `zero_50` at +0x50 is not zero (byte 12 is 0x01)"
+   },
+   {
+    "sentence": "In each uniform record +0x68 is 1..6.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: record 0: field `stage_mask` at +0x68 is 32, outside 1 to 6"
+   },
+   {
+    "sentence": "In each uniform record +0x6c is the u32 255 and +0x70..+0x78 is all 0xff.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 94,
+    "counterexample": "refuted by ed637071a05a: record 19: field `ff70` at +0x70 is 0000000000000000, not ffffffffffffffff"
+   },
+   {
+    "sentence": "In each uniform record +0x80..+0xb0 is all 0xff.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: record 18: field `ff80` at +0x80 is ffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000ffffffffffffffffffffffffffffffff, not fffffffffffffffffffffffffffffffffffff"
+   },
+   {
+    "sentence": "In each uniform record +0xb0 is a multiple-of-65536 value in 0..16777216 and +0xb4..+0xc0 is zero.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: record 19: field `zero_b4` at +0xb4 is not zero (byte 6 is 0x01)"
+   }
+  ],
+  "ledger": {
+   "proposals": 211,
+   "held": 211,
+   "refuted": 0,
+   "rejected": 0,
+   "other_calls": 1,
+   "request_chars": 178415,
+   "response_chars": 30292
+  }
+ },
+ {
+  "run": 3,
+  "arm": "ledger",
+  "statements": 52,
+  "hold": 31,
+  "wrong": 21,
+  "wrong_on_working_files": 0,
+  "bytes_typed_by_layouts_that_hold": 5212,
+  "tokens_reported_by_harness": 89827,
+  "tool_uses": 21,
+  "seconds": 216,
+  "new_input_tokens": 70016,
+  "output_tokens": 17208,
+  "cached_input_tokens_reread": 1325443,
+  "wrong_statements": [
+   {
+    "sentence": "Every file is at least 20 bytes long and, in bytes 0x0..0x14, has: u32 at 0x0 is one of [0, 1]; bytes 218e0000000000000b000000 at 0x8.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `flag_0x0` at +0x0 is 5, not one of the claimed values"
+   },
+   {
+    "sentence": "Every file is at least 256 bytes long and, in bytes 0x24..0x100, has: bytes 000000000000000000000000000000000100000001000000010000000100000001000000010000000100000001000000757f00000100000001000000000000006400000080180000 at 0x24; bytes 00000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 at 0x70; 32 zero bytes at 0xcc; 12 zero bytes at 0xf0.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 1,
+    "counterexample": "refuted by 04e2a3a0bc07: field `const_0x24` at +0x24 is 000000000000000000000000000000000100000001000000010000000100000001000000010000000100000001000000000000000100000001000000000000006400000080180000"
+   },
+   {
+    "sentence": "Every file is at least 1024 bytes long and, in bytes 0x300..0x400, has: bytes ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000 at 0x300.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `const_0x300` at +0x300 is ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff000000"
+   },
+   {
+    "sentence": "Every file is at least 1536 bytes long and, in bytes 0x500..0x600, has: bytes 000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff at 0x500.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: field `const_0x500` at +0x500 is 000000000100000000000000000000000000000012000000110000000000000000000000010000000000000000000000000000000d0000000c00000000000000ffffffffffffff"
+   },
+   {
+    "sentence": "Every file is at least 6144 bytes long and, in bytes 0x1700..0x1800, has: 240 zero bytes at 0x1700; u32 at 0x17f0 is one of [1, 2]; bytes 0000000001010000 at 0x17f8.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `flag_0x17f0` at +0x17f0 is 32, not one of the claimed values"
+   },
+   {
+    "sentence": "The u32 at 0x15c equals the u32 at 0x0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x15c is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0x164 equals the u32 at 0x0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x164 is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0x16c equals the u32 at 0x0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x16c is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0x740 equals the u32 at 0x73c.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x740 is 4, but the sum is 3"
+   },
+   {
+    "sentence": "The u32 at 0xd9c equals the u32 at 0xd80.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0xd9c is 2, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0x17f0 equals the u32 at 0x1cc plus 1.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x17f0 is 32, but the sum is 1"
+   },
+   {
+    "sentence": "The u32 at 0x138 equals the u32 at 0x124 plus 15.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 26,
+    "counterexample": "refuted by 141a082d0ca9: the value at +0x138 is 18, but the sum is 19"
+   },
+   {
+    "sentence": "The u32 at 0x188c equals the sum of the u32s at 0x73c and 0x18ac.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 89,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x188c is 4, but the sum is 3"
+   },
+   {
+    "sentence": "The u32 at 0x1890 equals the sum of the u32s at 0x740 and 0x18b0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x1890 is 3, but the sum is 4"
+   },
+   {
+    "sentence": "The u32 at 0x18a4 equals the sum of the u32s at 0x754 and 0x18c4.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x18a4 is 36, but the sum is 0"
+   },
+   {
+    "sentence": "The u32 at 0x18a8 equals the sum of the u32s at 0x758 and 0x18c8.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x18a8 is 20, but the sum is 0"
+   },
+   {
+    "sentence": "The u32 at 0x18cc equals the sum of the u32s at 0xd80 and 0x15cc.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18cc is 2, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0x18d0 equals the sum of the u32s at 0xd7c and 0x15cc.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18d0 is 1, but the sum is 4"
+   },
+   {
+    "sentence": "The u32 at 0x18e4 equals the sum of the u32s at 0xd94 and 0x15e4.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18e4 is 21, but the sum is 45"
+   },
+   {
+    "sentence": "The u32 at 0xd80 equals the sum of the u32s at 0x0 and 0xd7c.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0xd80 is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0xbc counts 216-byte uniform records starting at offset 0x18f4 (6388); in each record the name length at +0 is 1..255, the u32s at +0xc, +0x14 and +0x4c are 0 or 1, +0x68 is 1 or 2, +0x6c is 255, +0x18..+0x24, +0x50..+0x68, +0xb4..+0xc0 and +0xc4..+0xd8 are zero, and +0x70..+0x78 and +0x80..+0xb0 are all 0xff.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 261,
+    "counterexample": "refuted by 4e87c7f69da3: record 7: field `flag_4c` at +0x4c is 2, not one of the claimed values"
+   }
+  ],
+  "ledger": {
+   "proposals": 53,
+   "held": 53,
+   "refuted": 0,
+   "rejected": 0,
+   "other_calls": 3,
+   "request_chars": 50092,
+   "response_chars": 28297
+  }
+ },
+ {
+  "run": 5,
+  "arm": "ledger",
+  "statements": 38,
+  "hold": 20,
+  "wrong": 18,
+  "wrong_on_working_files": 0,
+  "bytes_typed_by_layouts_that_hold": 4628,
+  "tokens_reported_by_harness": 105044,
+  "tool_uses": 23,
+  "seconds": 282,
+  "new_input_tokens": 85125,
+  "output_tokens": 24329,
+  "cached_input_tokens_reread": 1725769,
+  "wrong_statements": [
+   {
+    "sentence": "The first 4-byte word is the shader stage: 0 for a fragment program, 1 for a vertex program.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `stage` at +0x0 is 5, not one of the claimed values"
+   },
+   {
+    "sentence": "The words at 0x8, 0xc, 0x10 and 0x24..0xbc of the header are fixed: 0x8e21, 0, 11, zeros to 0x34, eight words of 1 at 0x34..0x54, 0x7f75 at 0x54, 1 at 0x58 and 0x5c, 0 at 0x60, 100 (0x64) at 0x64, 0x1880 at 0x68, 0 at 0x70, 1 at 0x74, and zeros from 0x78 to 0xbc.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 1,
+    "counterexample": "refuted by 04e2a3a0bc07: field `hdr_54` at +0x54 is 0, outside 32629 to 32629"
+   },
+   {
+    "sentence": "The binding table at 0x1ec..0x73c holds unused slots: each pair is (0, 0xffffffff), with a zero run at 0x4e0..0x53c and 0xff bytes 0x53c..0x73c.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 89,
+    "counterexample": "refuted by 7ef2efa13bde: field `slotB_zero_4dc` at +0x4dc is not zero (byte 40 is 0x01)"
+   },
+   {
+    "sentence": "The word at 0x17f0 is 1 or 2 (1 for vertex, 2 for fragment programs).",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `stage2` at +0x17f0 is 32, not one of the claimed values"
+   },
+   {
+    "sentence": "The total at 0x188c is the sum of the vertex count at 0x73c and the fragment count at 0x18ac.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 89,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x188c is 4, but the sum is 3"
+   },
+   {
+    "sentence": "The total at 0x1890 is the sum of 0x740 and 0x18b0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x1890 is 3, but the sum is 4"
+   },
+   {
+    "sentence": "The total at 0x18a4 is the sum of 0x754 and 0x18c4.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x18a4 is 36, but the sum is 0"
+   },
+   {
+    "sentence": "The total at 0x18a8 is the sum of 0x758 and 0x18c8.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x18a8 is 20, but the sum is 0"
+   },
+   {
+    "sentence": "The total at 0x18cc is the sum of 0xd80 and 0x15cc.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18cc is 2, but the sum is 5"
+   },
+   {
+    "sentence": "The total at 0x18d0 is the sum of 0xd7c and 0x15cc.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18d0 is 1, but the sum is 4"
+   },
+   {
+    "sentence": "The total at 0x18e4 is the sum of 0xd94 and 0x15e4.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18e4 is 21, but the sum is 45"
+   },
+   {
+    "sentence": "The word at 0xd9c equals the word at 0xd80.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0xd9c is 2, but the sum is 5"
+   },
+   {
+    "sentence": "The word at 0x15c equals the stage word at 0x0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x15c is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The word at 0x164 equals the stage word at 0x0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x164 is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The word at 0x16c equals the stage word at 0x0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x16c is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The word at 0x17f0 is the word at 0x1cc plus 1.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x17f0 is 32, but the sum is 1"
+   },
+   {
+    "sentence": "The uniform count at 0xbc gives the number of 216-byte uniform records starting at 0x18f4; in every record the words at +0x18..+0x24, +0x50..+0x68, +0xb4..+0xc0 and +0xc4..+0xd8 are zero, +0x6c is 255, and +0x70, +0x74 and +0x80..+0xb0 are 0xffffffff.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 96,
+    "counterexample": "refuted by ed637071a05a: record 19: field `r_70` at +0x70 is 0, outside 4294967295 to 4294967295"
+   },
+   {
+    "sentence": "Each uniform record's flags at +0xc, +0x14 and +0x4c are 0 or 1.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 165,
+    "counterexample": "refuted by 4e87c7f69da3: record 7: field `f4c` at +0x4c is 2, not one of the claimed values"
+   }
+  ],
+  "ledger": {
+   "proposals": 38,
+   "held": 38,
+   "refuted": 0,
+   "rejected": 0,
+   "other_calls": 2,
+   "request_chars": 69071,
+   "response_chars": 16213
+  }
+ },
+ {
+  "run": 2,
+  "arm": "control",
+  "statements": 152,
+  "hold": 130,
+  "wrong": 22,
+  "wrong_on_working_files": 0,
+  "bytes_typed_by_layouts_that_hold": 6228,
+  "tokens_reported_by_harness": 106197,
+  "tool_uses": 20,
+  "seconds": 293,
+  "new_input_tokens": 85192,
+  "output_tokens": 25743,
+  "cached_input_tokens_reread": 1381959,
+  "wrong_statements": [
+   {
+    "sentence": "The 32-bit integer at offset 0x0 (variant_flag) is one of [0, 1].",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `variant_flag` at +0x0 is 5, not one of the claimed values"
+   },
+   {
+    "sentence": "The 4 bytes at offset 0x54 (constant_54) are always 757f0000.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 1,
+    "counterexample": "refuted by 04e2a3a0bc07: field `constant_54` at +0x54 is 00000000, not 757f0000"
+   },
+   {
+    "sentence": "The 96 bytes at offset 0x4dc (reserved_4dc) are all zero.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: field `reserved_4dc` at +0x4dc is not zero (byte 40 is 0x01)"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x138 equals the integer at 0x124 + 15.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 26,
+    "counterexample": "refuted by 141a082d0ca9: the value at +0x138 is 18, but the sum is 19"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x15c equals the integer at 0x0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x15c is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x164 equals the integer at 0x0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x164 is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x16c equals the integer at 0x0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x16c is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x17f0 equals the integer at 0x1cc + 1.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x17f0 is 32, but the sum is 1"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x17f0 (stage_count) is one of [1, 2].",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `stage_count` at +0x17f0 is 32, not one of the claimed values"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x188c equals the integer at 0x73c + the integer at 0x18ac.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 89,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x188c is 4, but the sum is 3"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x1890 equals the integer at 0x740 + the integer at 0x18b0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x1890 is 3, but the sum is 4"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x18a4 equals the integer at 0x754 + the integer at 0x18c4.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x18a4 is 36, but the sum is 0"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x18a8 equals the integer at 0x758 + the integer at 0x18c8.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x18a8 is 20, but the sum is 0"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x18cc equals the integer at 0xd80 + the integer at 0x15cc.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18cc is 2, but the sum is 5"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x18d0 equals the integer at 0xd7c + the integer at 0x15cc.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18d0 is 1, but the sum is 4"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0x18e4 equals the integer at 0xd94 + the integer at 0x15e4.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18e4 is 21, but the sum is 45"
+   },
+   {
+    "sentence": "The 32-bit integer at offset 0xd80 equals the integer at 0xd7c + the integer at 0x0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0xd80 is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The uniform table starts at 0x18f4 with as many 216-byte records as the count at 0xbc; in every record the 12-byte field at +24 (reserved_24) satisfies \"zero\".",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: record 22: field `reserved_24` at +0x18 is not zero (byte 4 is 0x01)"
+   },
+   {
+    "sentence": "The uniform table starts at 0x18f4 with as many 216-byte records as the count at 0xbc; in every record the 4-byte field at +76 (flag_76) satisfies {\"one_of\": [0, 1]}.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 165,
+    "counterexample": "refuted by 4e87c7f69da3: record 7: field `flag_76` at +0x4c is 2, not one of the claimed values"
+   },
+   {
+    "sentence": "The uniform table starts at 0x18f4 with as many 216-byte records as the count at 0xbc; in every record the 24-byte field at +80 (reserved_80) satisfies \"zero\".",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: record 1: field `reserved_80` at +0x50 is not zero (byte 12 is 0x01)"
+   },
+   {
+    "sentence": "The uniform table starts at 0x18f4 with as many 216-byte records as the count at 0xbc; in every record the 4-byte field at +104 (stage_mask) satisfies {\"uint\": {\"min\": 1, \"max\": 3}}.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: record 0: field `stage_mask` at +0x68 is 32, outside 1 to 3"
+   },
+   {
+    "sentence": "The uniform table starts at 0x18f4 with as many 216-byte records as the count at 0xbc; in every record the 12-byte field at +180 (reserved_180) satisfies \"zero\".",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: record 19: field `reserved_180` at +0xb4 is not zero (byte 6 is 0x01)"
+   }
+  ]
+ },
+ {
+  "run": 4,
+  "arm": "control",
+  "statements": 40,
+  "hold": 18,
+  "wrong": 22,
+  "wrong_on_working_files": 0,
+  "bytes_typed_by_layouts_that_hold": 4568,
+  "tokens_reported_by_harness": 100695,
+  "tool_uses": 16,
+  "seconds": 232,
+  "new_input_tokens": 80629,
+  "output_tokens": 20786,
+  "cached_input_tokens_reread": 1044991,
+  "wrong_statements": [
+   {
+    "sentence": "The file is at least 6388 bytes; the u32 at 0 is 0 or 1, the u32 at 8 is 0x8E21, the u32 at 12 is 0 and the u32 at 16 is 11.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `flag` at +0x0 is 5, not one of the claimed values"
+   },
+   {
+    "sentence": "The u32 at 84 is 0x7F75, the u32 at 88 and 92 are 1, the u32 at 96 is 0, the u32 at 100 is 100 and the u32 at 104 is 0x1880.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 1,
+    "counterexample": "refuted by 04e2a3a0bc07: field `c54` at +0x54 is 00000000, not 757f0000"
+   },
+   {
+    "sentence": "From 380 to 460 and from 492 to 1244 the file holds (0, 0xFFFFFFFF) u32 pairs.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `slotsB` at +0x1ec is 00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff000"
+   },
+   {
+    "sentence": "Bytes 1244..1339 are zero and bytes 1340..1851 are all 0xFF.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: field `z` at +0x4dc is not zero (byte 40 is 0x01)"
+   },
+   {
+    "sentence": "A second header at 6128: u32 1 or 2, a size u32, a zero u32, u32 0x101, a zero u32; bytes 6176..6283 are zero.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `sec_flag` at +0x17f0 is 32, not one of the claimed values"
+   },
+   {
+    "sentence": "The u32 at 1856 equals the u32 at 1852.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x740 is 4, but the sum is 3"
+   },
+   {
+    "sentence": "The u32 at 3484 equals the u32 at 3456.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0xd9c is 2, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 6284 is the sum of the u32 at 1852 and 6316.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 89,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x188c is 4, but the sum is 3"
+   },
+   {
+    "sentence": "The u32 at 6288 is the sum of the u32 at 1856 and 6320.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x1890 is 3, but the sum is 4"
+   },
+   {
+    "sentence": "The u32 at 6308 is the sum of the u32 at 1876 and 6340.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x18a4 is 36, but the sum is 0"
+   },
+   {
+    "sentence": "The u32 at 6312 is the sum of the u32 at 1880 and 6344.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x18a8 is 20, but the sum is 0"
+   },
+   {
+    "sentence": "The u32 at 6372 is the sum of the u32 at 3476 and 5604.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18e4 is 21, but the sum is 45"
+   },
+   {
+    "sentence": "The u32 at 6348 is the sum of the u32 at 3456 and 5580.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18cc is 2, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 6352 is the sum of the u32 at 3452 and 5580.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18d0 is 1, but the sum is 4"
+   },
+   {
+    "sentence": "The u32 at 3456 is the sum of the u32 at 3452 and the flag at 0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0xd80 is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 348 equals the flag at 0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x15c is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 356 equals the flag at 0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x164 is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 364 equals the flag at 0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x16c is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 6128 is one more than the u32 at 460.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x17f0 is 32, but the sum is 1"
+   },
+   {
+    "sentence": "The uniform count at 188 gives that many 216-byte uniform records from 6388; each has a name length 1..1024, a name offset below 1000000, an array size 1..65535, and fixed zero and 0xFF filler.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 96,
+    "counterexample": "refuted by ed637071a05a: record 19: field `ff70` at +0x70 is 0000000000000000, not ffffffffffffffff"
+   },
+   {
+    "sentence": "In every uniform record the u32 at +0x6C is 0xFF and the u32 at +0x68 is 1 or 2.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: record 0: field `c68` at +0x68 is 32, not one of the claimed values"
+   },
+   {
+    "sentence": "Every uniform record's GL type at +0x10 is FLOAT, FLOAT_VEC4 or SAMPLER_2D, and its component type at +0x2C is FLOAT or SAMPLER.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 128,
+    "counterexample": "refuted by 15ed7004b5a5: record 18: field `type` at +0x10 is 35680, not one of the claimed values"
+   }
+  ]
+ },
+ {
+  "run": 6,
+  "arm": "control",
+  "statements": 59,
+  "hold": 39,
+  "wrong": 20,
+  "wrong_on_working_files": 0,
+  "bytes_typed_by_layouts_that_hold": 5540,
+  "tokens_reported_by_harness": 111033,
+  "tool_uses": 24,
+  "seconds": 290,
+  "new_input_tokens": 91023,
+  "output_tokens": 26032,
+  "cached_input_tokens_reread": 1699095,
+  "wrong_statements": [
+   {
+    "sentence": "Offset 0x54 holds the u32 0x7f75, followed by two u32 equal to 1 and a zero u32.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 1,
+    "counterexample": "refuted by 04e2a3a0bc07: field `const_54` at +0x54 is 00000000, not 757f0000"
+   },
+   {
+    "sentence": "The u32 at 0x138 equals the u32 at 0x124 plus 15.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 26,
+    "counterexample": "refuted by 141a082d0ca9: the value at +0x138 is 18, but the sum is 19"
+   },
+   {
+    "sentence": "The u32 at 0x15c equals the stage field at offset 0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x15c is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0x164 equals the stage field at offset 0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x164 is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0x16c equals the stage field at offset 0.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x16c is 0, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0x17f0 equals the u32 at 0x1cc plus 1.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x17f0 is 32, but the sum is 1"
+   },
+   {
+    "sentence": "The stage slot table at 0x15c holds (flag, index) pairs: flags are 0 or 1 and indexes are small or 0xffffffff.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 26,
+    "counterexample": "refuted by 141a082d0ca9: field `i160` at +0x160 is 1, not one of the claimed values"
+   },
+   {
+    "sentence": "From 0x38c to 0x3fc the slot table holds unused (0, 0xffffffff) pairs.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `slot38c_flag_38c` at +0x38c is not zero (byte 0 is 0x01)"
+   },
+   {
+    "sentence": "Offsets 0x4dc..0x53c are zero.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: field `zero_4dc` at +0x4dc is not zero (byte 40 is 0x01)"
+   },
+   {
+    "sentence": "Offsets 0x53c..0x73c are all 0xff.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: field `ff_53c` at +0x53c is 00000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+   },
+   {
+    "sentence": "The u32 at 0x740 equals the u32 at 0x73c.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 87,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x740 is 4, but the sum is 3"
+   },
+   {
+    "sentence": "The u32 at 0xd9c equals the u32 at 0xd80.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0xd9c is 2, but the sum is 5"
+   },
+   {
+    "sentence": "Offset 0x17f0 is 1 or 2, 0x17f8 is zero, 0x17fc holds 0x101 and 0x1800 is zero.",
+    "kind": "memory_layout",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: field `sub_version` at +0x17f0 is 32, not one of the claimed values"
+   },
+   {
+    "sentence": "The u32 at 0x188c is the sum of the u32 at 0x73c and 0x18ac.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 89,
+    "counterexample": "refuted by 7ef2efa13bde: the value at +0x188c is 4, but the sum is 3"
+   },
+   {
+    "sentence": "The u32 at 0x18a4 is the sum of the u32 at 0x754 and 0x18c4.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x18a4 is 36, but the sum is 0"
+   },
+   {
+    "sentence": "The u32 at 0x18a8 is the sum of the u32 at 0x758 and 0x18c8.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 2,
+    "counterexample": "refuted by 7795210f9fc9: the value at +0x18a8 is 20, but the sum is 0"
+   },
+   {
+    "sentence": "The u32 at 0x18cc is the sum of the u32 at 0xd80 and 0x15cc.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18cc is 2, but the sum is 5"
+   },
+   {
+    "sentence": "The u32 at 0x18d0 is the sum of the u32 at 0xd7c and 0x15cc.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18d0 is 1, but the sum is 4"
+   },
+   {
+    "sentence": "The u32 at 0x18e4 is the sum of the u32 at 0xd94 and 0x15e4.",
+    "kind": "field_relation",
+    "held_out_files_that_disagree": 42,
+    "counterexample": "refuted by aedb3be4e5d4: the value at +0x18e4 is 21, but the sum is 45"
+   },
+   {
+    "sentence": "From offset 0x18f4 there are uniform-count (u32 at 0xbc) records of 216 bytes each: name length, name offset into the name table, array size, GL type enum, component type enum, then fixed 0xff and zero padding areas.",
+    "kind": "record_array",
+    "held_out_files_that_disagree": 261,
+    "counterexample": "refuted by 4e87c7f69da3: record 7: field `f76` at +0x4c is 2, not one of the claimed values"
+   }
+  ]
+ }
+]
