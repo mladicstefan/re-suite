@@ -7,10 +7,10 @@ use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use ledger_checkers::{CheckError, check_claim, checker_of};
+use ledger_checkers::{CheckError, check_claim, checker_of, har_exchanges};
 use ledger_core::{
-    Body, CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event, EvidenceId,
-    EvidenceKind, Header, HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict, admit,
+    CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event, EvidenceId, EvidenceKind,
+    Ledger, Status, Verdict, admit,
 };
 use ledger_store::{Snapshot, Store, StoreError};
 use schemars::JsonSchema;
@@ -560,87 +560,6 @@ fn captures_of(
     Ok(stamp(snapshot, &out))
 }
 
-/// The parts of a HAR file this server reads. Everything else in the file is ignored.
-#[derive(rmcp::serde::Deserialize)]
-#[serde(crate = "rmcp::serde")]
-struct Har {
-    log: HarLog,
-}
-
-#[derive(rmcp::serde::Deserialize)]
-#[serde(crate = "rmcp::serde")]
-struct HarLog {
-    entries: Vec<HarEntry>,
-}
-
-#[derive(rmcp::serde::Deserialize)]
-#[serde(crate = "rmcp::serde")]
-struct HarEntry {
-    request: HarRequest,
-    response: Option<HarResponse>,
-}
-
-#[derive(rmcp::serde::Deserialize)]
-#[serde(crate = "rmcp::serde", rename_all = "camelCase")]
-struct HarRequest {
-    method: String,
-    url: String,
-    #[serde(default)]
-    headers: Vec<Header>,
-    post_data: Option<HarContent>,
-}
-
-#[derive(rmcp::serde::Deserialize)]
-#[serde(crate = "rmcp::serde")]
-struct HarResponse {
-    status: u16,
-    #[serde(default)]
-    headers: Vec<Header>,
-    content: Option<HarContent>,
-}
-
-#[derive(rmcp::serde::Deserialize)]
-#[serde(crate = "rmcp::serde")]
-struct HarContent {
-    text: Option<String>,
-    encoding: Option<String>,
-}
-
-impl HarContent {
-    fn body(self) -> Option<Body> {
-        let base64 = self.encoding.as_deref() == Some("base64");
-        self.text.map(|text| {
-            if base64 {
-                Body::Base64(text)
-            } else {
-                Body::Text(text)
-            }
-        })
-    }
-}
-
-impl From<HarEntry> for HttpExchange {
-    fn from(entry: HarEntry) -> Self {
-        Self {
-            request: HttpRequest {
-                method: entry.request.method,
-                url: entry.request.url,
-                headers: entry.request.headers,
-                body: entry.request.post_data.and_then(HarContent::body),
-            },
-            // HAR writes status 0 for a request that was never answered.
-            response: entry
-                .response
-                .filter(|r| r.status != 0)
-                .map(|r| HttpResponse {
-                    status: r.status,
-                    headers: r.headers,
-                    body: r.content.and_then(HarContent::body),
-                }),
-        }
-    }
-}
-
 /// Why a claim has its status: its premises, its recent verdicts and any counterexample.
 ///
 /// # Errors
@@ -700,17 +619,17 @@ pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<Str
     let har = (kind == EvidenceKind::HttpExchange)
         .then(|| std::fs::read(path).ok())
         .flatten()
-        .and_then(|bytes| rmcp::serde_json::from_slice::<Har>(&bytes).ok());
-    let Some(har) = har else {
+        .and_then(|bytes| har_exchanges(&bytes));
+    let Some(exchanges) = har else {
         let id = store.add_evidence_file(kind, path)?;
         let body = format!("evidence {}", short(id.as_str()));
         return Ok(stamp(&store.snapshot(), &body));
     };
     let before = store.snapshot();
-    let total = har.log.entries.len();
-    for entry in har.log.entries {
-        let exchange = rmcp::serde_json::to_vec(&HttpExchange::from(entry))
-            .map_err(|e| StoreError::Core(e.into()))?;
+    let total = exchanges.len();
+    for exchange in exchanges {
+        let exchange =
+            rmcp::serde_json::to_vec(&exchange).map_err(|e| StoreError::Core(e.into()))?;
         store.add_evidence(kind, &exchange)?;
     }
     // Each new piece of evidence is one event; repeats inside the file and re-imports add none.

@@ -774,20 +774,157 @@ fn decode<'e, E>(
         .collect()
 }
 
-/// The evidence as captures of one endpoint: each must be an HTTP exchange that
-/// belongs to it, and `other_status` says which responses the claim is not about.
+/// Which of an endpoint's exchanges a web claim is about.
+enum Scope {
+    /// Every request, answered or not.
+    Any,
+    /// Requests that got a response.
+    Answered,
+    /// Requests the server did not turn down.
+    Accepted,
+    /// Responses with exactly this status.
+    Status(u16),
+}
+
+impl Scope {
+    /// Why a capture with this response status is not about the claim, if it is not.
+    fn excludes(&self, got: Option<u16>) -> Option<String> {
+        match (self, got) {
+            (Self::Answered | Self::Status(_), None) => Some("a request with no response".into()),
+            (Self::Accepted, Some(status)) if status >= 400 => {
+                Some(format!("a request the server answered with {status}"))
+            }
+            (Self::Status(want), Some(status)) if status != *want => {
+                Some(format!("a {status} response"))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The endpoint a web claim is about and which of its exchanges, or `None` for a
+/// claim about snapshots.
+fn scope(claim: &ClaimKind) -> Option<(&str, Scope)> {
+    match claim {
+        ClaimKind::StatusSet(c) => Some((&c.endpoint, Scope::Answered)),
+        ClaimKind::RequestBodySchema(c) => Some((&c.endpoint, Scope::Any)),
+        ClaimKind::RequestHeader(c) => Some((&c.endpoint, Scope::Any)),
+        ClaimKind::RequestSignature(c) => Some((&c.endpoint, Scope::Accepted)),
+        ClaimKind::ResponseSchema(c) => Some((&c.endpoint, Scope::Status(c.status))),
+        ClaimKind::MemoryLayout(_)
+        | ClaimKind::RecordArray(_)
+        | ClaimKind::FieldRelation(_)
+        | ClaimKind::TaggedRecords(_)
+        | ClaimKind::StringTable(_) => None,
+    }
+}
+
+/// Whether a captured exchange is one a claim speaks about: its endpoint, and the
+/// kind of response the claim covers. Never true for a claim about snapshots.
+#[must_use]
+pub fn is_about(claim: &ClaimKind, exchange: &HttpExchange) -> bool {
+    let request = &exchange.request;
+    let status = exchange.response.as_ref().map(|r| r.status);
+    scope(claim).is_some_and(|(endpoint, scope)| {
+        Endpoint::parse(endpoint).is_ok_and(|e| e.matches(&request.method, &request.url))
+            && scope.excludes(status).is_none()
+    })
+}
+
+/// The evidence as captures of the claim's endpoint: each must be an HTTP exchange
+/// the claim is about.
 fn exchanges(
     evidence: &[Raw<'_>],
-    endpoint: &str,
-    other_status: impl Fn(Option<u16>) -> Option<String>,
+    claim: &ClaimKind,
 ) -> Result<Vec<Item<HttpExchange>>, CheckError> {
+    let (endpoint, scope) =
+        scope(claim).ok_or_else(|| CheckError::InvalidClaim("not a web claim".into()))?;
     let decoded = decode(
         EvidenceKind::HttpExchange,
         MAX_PARSED_EVIDENCE,
         evidence,
         http_exchange,
     );
-    decoded.and_then(|items| about(endpoint, other_status, items))
+    decoded.and_then(|items| about(endpoint, |got| scope.excludes(got), items))
+}
+
+/// The parts of a HAR file that become evidence. Everything else in the file is ignored.
+#[derive(serde::Deserialize)]
+struct Har {
+    log: HarLog,
+}
+
+#[derive(serde::Deserialize)]
+struct HarLog {
+    entries: Vec<HarEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct HarEntry {
+    request: HarRequest,
+    response: Option<HarResponse>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HarRequest {
+    method: String,
+    url: String,
+    #[serde(default)]
+    headers: Vec<ledger_core::Header>,
+    post_data: Option<HarContent>,
+}
+
+#[derive(serde::Deserialize)]
+struct HarResponse {
+    status: u16,
+    #[serde(default)]
+    headers: Vec<ledger_core::Header>,
+    content: Option<HarContent>,
+}
+
+#[derive(serde::Deserialize)]
+struct HarContent {
+    text: Option<String>,
+    encoding: Option<String>,
+}
+
+impl HarContent {
+    fn body(self) -> Option<Body> {
+        let base64 = self.encoding.as_deref() == Some("base64");
+        self.text.map(|text| {
+            if base64 {
+                Body::Base64(text)
+            } else {
+                Body::Text(text)
+            }
+        })
+    }
+}
+
+/// The exchanges recorded in a HAR file, one per entry, or `None` if the bytes
+/// are not a HAR file.
+#[must_use]
+pub fn har_exchanges(bytes: &[u8]) -> Option<Vec<HttpExchange>> {
+    let har: Har = serde_json::from_slice(bytes).ok()?;
+    let exchange = |entry: HarEntry| HttpExchange {
+        request: HttpRequest {
+            method: entry.request.method,
+            url: entry.request.url,
+            headers: entry.request.headers,
+            body: entry.request.post_data.and_then(HarContent::body),
+        },
+        // HAR writes status 0 for a request that was never answered.
+        response: entry
+            .response
+            .filter(|r| r.status != 0)
+            .map(|r| ledger_core::HttpResponse {
+                status: r.status,
+                headers: r.headers,
+                body: r.content.and_then(HarContent::body),
+            }),
+    };
+    Some(har.log.entries.into_iter().map(exchange).collect())
 }
 
 /// The evidence as memory snapshots, which are only sliced, never parsed.
@@ -830,7 +967,6 @@ pub fn check_claim(
     evidence: &[Raw<'_>],
     limit: Duration,
 ) -> Result<Verdict, CheckError> {
-    let any_status = |_: Option<u16>| None;
     match claim {
         ClaimKind::StringTable(c) => run(&StringTableChecker, id, c, snapshots(evidence), limit),
         ClaimKind::TaggedRecords(c) => {
@@ -838,64 +974,32 @@ pub fn check_claim(
         }
         ClaimKind::FieldRelation(c) => run(&RelationChecker, id, c, snapshots(evidence), limit),
         ClaimKind::RecordArray(c) => run(&RecordArrayChecker, id, c, snapshots(evidence), limit),
-        ClaimKind::StatusSet(c) => {
-            // A request that was never answered says nothing about which statuses come back.
-            let unanswered = |got: Option<u16>| {
-                got.is_none()
-                    .then(|| "a request with no response".to_owned())
-            };
-            run(
-                &StatusChecker,
-                id,
-                c,
-                exchanges(evidence, &c.endpoint, unanswered),
-                limit,
-            )
-        }
-        ClaimKind::RequestBodySchema(c) => run(
-            &BodySchemaChecker,
-            id,
-            c,
-            exchanges(evidence, &c.endpoint, any_status),
-            limit,
-        ),
-        ClaimKind::RequestHeader(c) => run(
-            &HeaderChecker,
-            id,
-            c,
-            exchanges(evidence, &c.endpoint, any_status),
-            limit,
-        ),
         ClaimKind::MemoryLayout(c) => run(&MemoryLayoutChecker, id, c, snapshots(evidence), limit),
+        ClaimKind::StatusSet(c) => run(&StatusChecker, id, c, exchanges(evidence, claim), limit),
+        ClaimKind::RequestBodySchema(c) => {
+            run(&BodySchemaChecker, id, c, exchanges(evidence, claim), limit)
+        }
+        ClaimKind::RequestHeader(c) => {
+            run(&HeaderChecker, id, c, exchanges(evidence, claim), limit)
+        }
+        ClaimKind::ResponseSchema(c) => {
+            run(&SchemaChecker, id, c, exchanges(evidence, claim), limit)
+        }
         ClaimKind::RequestSignature(c) => {
             // The key travels with the captures as secret evidence; it is not a capture.
             let captures: Vec<Raw<'_>> = (evidence.iter())
                 .filter(|(_, kind, _)| *kind != EvidenceKind::Secret)
                 .cloned()
                 .collect();
-            // A request the server turned down says nothing about how accepted ones are signed.
-            let rejected = |got: Option<u16>| {
-                let status = got.filter(|s| *s >= 400)?;
-                Some(format!("a request the server answered with {status}"))
-            };
             let key = (evidence.iter())
                 .find(|(e, kind, _)| *e == c.key && *kind == EvidenceKind::Secret)
                 .map(|(_, _, bytes)| *bytes)
                 .ok_or_else(|| CheckError::MissingKey(c.key.clone()))?;
-            let items = exchanges(&captures, &c.endpoint, rejected);
-            run(&SignatureChecker { key }, id, c, items, limit)
-        }
-        ClaimKind::ResponseSchema(c) => {
-            let other = |got: Option<u16>| match got {
-                Some(status) if status == c.status => None,
-                Some(status) => Some(format!("a {status} response")),
-                None => Some("a request with no response".into()),
-            };
             run(
-                &SchemaChecker,
+                &SignatureChecker { key },
                 id,
                 c,
-                exchanges(evidence, &c.endpoint, other),
+                exchanges(&captures, claim),
                 limit,
             )
         }
