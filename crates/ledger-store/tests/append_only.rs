@@ -65,17 +65,39 @@ fn no_code_rewrites_the_event_log() -> std::io::Result<()> {
 #[test]
 fn sqlite_refuses_to_rewrite_the_event_log() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let db = dir.path().join("l.db");
-    Store::open(&db)?.add_evidence(EvidenceKind::MemorySnapshot, &[1])?;
-    let conn = rusqlite::Connection::open(&db)?;
-    assert!(
-        conn.execute("UPDATE events SET recorded_at = ''", [])
-            .is_err()
-    );
-    assert!(conn.execute("DELETE FROM events", []).is_err());
-    assert_eq!(
-        conn.query_one("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))?,
-        1
-    );
+    let fresh = dir.path().join("l.db");
+    Store::open(&fresh)?.add_evidence(EvidenceKind::MemorySnapshot, &[1])?;
+    // Files of older versions get the same refusals once a store has migrated them.
+    let mut ledgers = vec![fresh];
+    for old in ["v1.db", "v2.db"] {
+        let db = dir.path().join(old);
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(old),
+            &db,
+        )?;
+        drop(Store::open(&db)?);
+        ledgers.push(db);
+    }
+    for db in ledgers {
+        let conn = rusqlite::Connection::open(&db)?;
+        let log = || {
+            let mut stmt = conn.prepare("SELECT seq, payload, recorded_at FROM events")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<Result<Vec<(i64, String, String)>, _>>()
+        };
+        let before = log()?;
+        assert!(
+            conn.execute("UPDATE events SET recorded_at = ''", [])
+                .is_err()
+        );
+        assert!(conn.execute("DELETE FROM events", []).is_err());
+        // REPLACE deletes the old row without firing a DELETE trigger.
+        let replace =
+            "INSERT OR REPLACE INTO events (seq, payload, recorded_at) VALUES (1, '{}', '')";
+        assert!(conn.execute(replace, []).is_err(), "{}", db.display());
+        assert_eq!(log()?, before);
+    }
     Ok(())
 }

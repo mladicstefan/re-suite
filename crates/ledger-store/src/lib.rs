@@ -12,7 +12,7 @@ use rusqlite::{Connection, OpenFlags, params};
 
 /// Bumped by every schema change; each bump needs a forward migration and a
 /// ledger file of the old version under `tests/fixtures`.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Jobs waiting for the writer. A full queue blocks the producer.
 const QUEUE: usize = 1024;
@@ -59,17 +59,30 @@ CREATE TRIGGER events_no_update BEFORE UPDATE ON events
     BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
 CREATE TRIGGER events_no_delete BEFORE DELETE ON events
     BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
-PRAGMA user_version = 2;
+CREATE TRIGGER events_no_replace BEFORE INSERT ON events
+    WHEN EXISTS (SELECT 1 FROM events WHERE seq = NEW.seq)
+    BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
+PRAGMA user_version = 3;
 ";
 
 /// Forward-only migrations: entry `n` takes a file from schema version `n + 1` to `n + 2`.
 /// Version 2 indexes HTTP evidence by its request line; rows from version 1 stay unindexed.
-const MIGRATIONS: [&str; 1] = ["
+/// Version 3 refuses an insert over an existing event, which a REPLACE does without a
+/// DELETE trigger firing.
+const MIGRATIONS: [&str; 2] = [
+    "
 ALTER TABLE evidence ADD COLUMN method TEXT;
 ALTER TABLE evidence ADD COLUMN url TEXT;
 ALTER TABLE evidence ADD COLUMN status INTEGER;
 PRAGMA user_version = 2;
-"];
+",
+    "
+CREATE TRIGGER events_no_replace BEFORE INSERT ON events
+    WHEN EXISTS (SELECT 1 FROM events WHERE seq = NEW.seq)
+    BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
+PRAGMA user_version = 3;
+",
+];
 
 /// The ledger as of event `seq`. Never changes once published.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -671,26 +684,30 @@ mod tests {
     }
 
     #[test]
-    fn ledger_files_of_schema_version_1_still_open() -> TestResult {
-        // Written once by `file_one_of_each` and never regenerated.
-        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v1.db");
-        let dir = tempfile::tempdir()?;
-        let db = dir.path().join("l.db");
-        fs::copy(fixture, &db)?;
-        // A file of an older version replays read-only as it is, and is migrated on open.
-        assert_eq!(statuses(&replay(&db)?.ledger), one_of_each()?);
-        let store = Store::open(&db)?;
-        assert_eq!(statuses(&store.snapshot().ledger), one_of_each()?);
-        let version: i64 =
-            Connection::open(&db)?.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        assert_eq!(version, SCHEMA_VERSION);
-        // The migrated index takes new captures and still lists none of the old rows.
-        let exchange = br#"{"request": {"method": "GET", "url": "https://a.example/x?k=1"}, "response": {"status": 200}}"#;
-        let id = store.add_evidence(EvidenceKind::HttpExchange, exchange)?;
-        let listed = store.http_evidence(None, 10)?;
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].0, id.as_str());
-        assert_eq!(listed[0].1.status, Some(200));
+    fn ledger_files_of_older_schema_versions_still_open() -> TestResult {
+        // Each written once by `file_one_of_each` in its version and never regenerated.
+        for fixture in ["v1.db", "v2.db"] {
+            let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(fixture);
+            let dir = tempfile::tempdir()?;
+            let db = dir.path().join("l.db");
+            fs::copy(fixture, &db)?;
+            // A file of an older version replays read-only as it is, and is migrated on open.
+            assert_eq!(statuses(&replay(&db)?.ledger), one_of_each()?);
+            let store = Store::open(&db)?;
+            assert_eq!(statuses(&store.snapshot().ledger), one_of_each()?);
+            let version: i64 =
+                Connection::open(&db)?.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            assert_eq!(version, SCHEMA_VERSION);
+            // The migrated index takes new captures and still lists none of the old rows.
+            let exchange = br#"{"request": {"method": "GET", "url": "https://a.example/x?k=1"}, "response": {"status": 200}}"#;
+            let id = store.add_evidence(EvidenceKind::HttpExchange, exchange)?;
+            let listed = store.http_evidence(None, 10)?;
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].0, id.as_str());
+            assert_eq!(listed[0].1.status, Some(200));
+        }
         Ok(())
     }
 
