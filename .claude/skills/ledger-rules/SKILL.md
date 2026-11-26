@@ -24,6 +24,10 @@ These are invariants, not style. A change that breaks one is wrong even if CI pa
 ## Status is derived, never stored
 - `Ledger::status` computes it from verdicts and premises on read.
 - Never add a status column, field, setter or event that sets it directly.
+- A verdict counts only while its checker is at the version the log last listed
+  (`Event::CheckersSet`, written by the server when it starts). Bump a checker's
+  `VERSION` whenever it could answer differently, and add every new checker to
+  `ledger_checkers::CHECKERS`; an unlisted checker is refused.
 
 ## One way in, one way to change
 - Nothing enters the ledger except through `admit`, which returns
