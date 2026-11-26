@@ -7,10 +7,12 @@ its traffic. The binary was read from disk and never run.
 
 - **Target:** `UnityCrashHandler64.exe`, the crash reporter a Unity game
   ships with: a 1.6 MB Windows program for x86-64, with no symbols.
-- **Export:** `scripts/rizin-facts.sh` runs Rizin 0.9.1 with its `aaa`
-  analysis and writes one JSON document. It took 4 seconds and produced
-  3.2 MB. Two runs give the same bytes.
-- **Evidence:** `add_evidence kind=binary_facts` cuts the export down to
+- **Export:** a shell script ran Rizin 0.9.1 with its `aaa` analysis
+  and wrote one JSON document. It took 4 seconds and produced 3.2 MB.
+  Two runs give the same bytes. Since this trial the server runs Rizin
+  itself: `add_evidence kind=binary_facts` takes the program's path,
+  and the same program takes 3 seconds.
+- **Evidence:** the import cuts the export down to
   what a claim can be checked on: 1,461 functions, 5,089 direct calls
   and 197 imported symbols that something calls, in 143 KB.
 - **Agent, ledger:** as before. Claude filed every claim through the

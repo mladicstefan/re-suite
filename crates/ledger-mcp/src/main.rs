@@ -1,6 +1,7 @@
 //! MCP server over stdio. Agents file claims and evidence here; every check replays saved evidence.
 //! Handlers stay thin: parse, hand the blocking work to `tools`, reply.
 
+mod rizin;
 mod tools;
 
 use std::sync::Arc;
@@ -50,8 +51,8 @@ struct ExplainArgs {
 #[serde(crate = "rmcp::serde")]
 struct AddEvidenceArgs {
     kind: EvidenceKind,
-    /// Local path of a saved capture, a snapshot, or for `binary_facts` the output
-    /// of `scripts/rizin-facts.sh <binary>`.
+    /// Local path of a saved capture or snapshot. For `binary_facts` it is the
+    /// program file itself: the server runs Rizin on it. The program is read, never run.
     path: String,
 }
 
@@ -60,6 +61,12 @@ struct AddEvidenceArgs {
 struct RetractArgs {
     claim: String,
     reason: String,
+}
+
+/// A rejection as the protocol carries it: the sentence, and its parts as data.
+fn refused(r: &Rejection) -> ErrorData {
+    let data = rmcp::serde_json::json!({"code": r.code, "subject": r.subject, "next": r.next});
+    ErrorData::invalid_params(r.to_string(), Some(data))
 }
 
 #[derive(Clone)]
@@ -87,11 +94,7 @@ impl LedgerServer {
         });
         match joined.await {
             Ok(Ok(text)) => Ok(text),
-            Ok(Err(r)) => {
-                let data =
-                    rmcp::serde_json::json!({"code": r.code, "subject": r.subject, "next": r.next});
-                Err(ErrorData::invalid_params(r.to_string(), Some(data)))
-            }
+            Ok(Err(r)) => Err(refused(&r)),
             Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
         }
     }
@@ -142,13 +145,23 @@ impl LedgerServer {
             .await
     }
 
-    #[tool(description = "Store a saved local capture or snapshot as evidence; returns its id.")]
+    #[tool(
+        description = "Store a saved local capture or snapshot as evidence; returns its id. A program given as binary_facts is analysed with Rizin first, which can take minutes."
+    )]
     async fn add_evidence(
         &self,
         Parameters(args): Parameters<AddEvidenceArgs>,
     ) -> Result<String, ErrorData> {
-        self.blocking("add_evidence", move |store| {
-            tools::add_evidence(store, args.kind, &args.path)
+        // A program is analysed first, in a child process; every other file is stored as it is.
+        let analysis = if args.kind == EvidenceKind::BinaryFacts {
+            let analysed = rizin::analyse(args.path.clone()).await;
+            analysed.map_err(|r| refused(&r))?
+        } else {
+            None
+        };
+        self.blocking("add_evidence", move |store| match analysis {
+            Some(ran) => tools::add_rizin_output(store, &ran.tool, &ran.output),
+            None => tools::add_evidence(store, args.kind, &args.path),
         })
         .await
     }

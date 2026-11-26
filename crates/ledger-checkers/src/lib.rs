@@ -1048,16 +1048,23 @@ pub fn har_exchanges(bytes: &[u8]) -> Option<Vec<HttpExchange>> {
     Some(har.log.entries.into_iter().map(exchange).collect())
 }
 
-/// The parts of a Rizin export (`scripts/rizin-facts.sh`) that become evidence.
-#[derive(serde::Deserialize)]
+/// The commands Rizin is run with, in the order [`rizin_facts`] reads their output:
+/// the file's format, its hashes, its imports, its relocations, then the analysis
+/// and the functions it found.
+pub const RIZIN_COMMANDS: &str = "iIj; iTj; iij; irj; aaa; aflj";
+
+/// What Rizin printed, one value per command.
 struct RizinExport {
-    tool: String,
     hashes: RizinHashes,
-    functions: Vec<RizinFunction>,
-    #[serde(default)]
     imports: Vec<RizinImport>,
-    #[serde(default)]
     relocs: Vec<RizinReloc>,
+    functions: Vec<RizinFunction>,
+}
+
+#[derive(serde::Deserialize)]
+struct RizinFormat {
+    /// `elf`, `pe`, `mach0` and so on; absent for a file Rizin does not recognise.
+    bintype: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1093,12 +1100,36 @@ struct RizinReloc {
     vaddr: u64,
 }
 
-/// The functions and direct calls in a Rizin export, or `None` if the bytes are not
-/// one. A jump to another function or to an import is a tail call and counts as a
-/// call; a jump inside a function does not.
-#[must_use]
-pub fn rizin_facts(bytes: &[u8]) -> Option<BinaryFacts> {
-    let export: RizinExport = serde_json::from_slice(bytes).ok()?;
+/// The functions and direct calls in what Rizin printed for [`RIZIN_COMMANDS`]. A jump
+/// to another function or to an import is a tail call and counts as a call; a jump
+/// inside a function does not. `tool` names the Rizin that ran.
+///
+/// # Errors
+/// The output is not the four JSON values the commands print, or holds no function.
+pub fn rizin_facts(tool: &str, output: &[u8]) -> Result<BinaryFacts, String> {
+    use serde::Deserialize as _;
+    let mut values = serde_json::Deserializer::from_slice(output);
+    let next = |what: &str| format!("{what} are missing or malformed");
+    let format = RizinFormat::deserialize(&mut values).map_err(|_| next("the file's format"))?;
+    // Rizin will disassemble any bytes; only a format it recognises says where the code is.
+    if format.bintype.is_none() {
+        return Err(String::from("the file is not a program format Rizin knows"));
+    }
+    let hashes = RizinHashes::deserialize(&mut values).map_err(|_| next("the file's hashes"))?;
+    let imports = Vec::<RizinImport>::deserialize(&mut values).map_err(|_| next("the imports"))?;
+    let relocs =
+        Vec::<RizinReloc>::deserialize(&mut values).map_err(|_| next("the relocations"))?;
+    let functions =
+        Vec::<RizinFunction>::deserialize(&mut values).map_err(|_| next("the functions"))?;
+    if functions.is_empty() {
+        return Err(String::from("no function was recovered"));
+    }
+    let export = RizinExport {
+        hashes,
+        imports,
+        relocs,
+        functions,
+    };
     let imported: BTreeSet<&str> = export.imports.iter().map(|i| i.name.as_str()).collect();
     // A call reaches an import through a stub function, a table slot or a relocated
     // pointer, depending on the file format and how the binary was linked.
@@ -1127,8 +1158,8 @@ pub fn rizin_facts(bytes: &[u8]) -> Option<BinaryFacts> {
     // Only imports something calls are kept: the rest cannot be the callee of a claim that holds.
     let called: BTreeSet<u64> = functions.iter().flat_map(|f| &f.calls).copied().collect();
     imports.retain(|at, _| called.contains(at));
-    Some(BinaryFacts {
-        tool: export.tool,
+    Ok(BinaryFacts {
+        tool: format!("{tool} ({RIZIN_COMMANDS})"),
         sha256: export.hashes.sha256,
         functions,
         imports,
@@ -2153,28 +2184,37 @@ mod tests {
 
     #[test]
     fn call_edges_replay_on_a_rizin_export() -> Result<(), Box<dyn std::error::Error>> {
-        // What `scripts/rizin-facts.sh` writes, cut down to two functions. `main` calls
-        // an import through its relocation, calls a function, jumps inside itself, and
-        // ends by jumping to another import.
-        let export = br#"{"tool":"rizin 0.9.1 (aaa)","hashes":{"sha256":"31"},"functions":[
-            {"offset":9344,"name":"main","size":262,"callrefs":[
+        // What Rizin prints, one line per command, cut down to two functions. `main`
+        // calls an import through its relocation, calls a function, jumps inside itself,
+        // and ends by jumping to another import.
+        let output = br#"{"bintype":"elf","arch":"x86"}
+            {"md5":"b6","sha256":"31"}
+            [{"ordinal":1,"name":"setlocale"},{"ordinal":2,"name":"free"},{"name":"exit"}]
+            [{"name":"setlocale","vaddr":40864},{"name":"free","vaddr":40568},
+                {"name":"exit","vaddr":40900}]
+            [{"offset":9344,"name":"main","size":262,"callrefs":[
                 {"from":9350,"to":40864,"type":"CALL"},
                 {"from":9360,"to":9616,"type":"CALL"},
                 {"from":9370,"to":9400,"type":"CODE"},
                 {"from":9380,"to":40900,"type":"CODE"}]},
-            {"offset":9616,"name":"fcn.00002590","callrefs":[]}],
-            "imports":[{"ordinal":1,"name":"setlocale"},{"ordinal":2,"name":"free"},{"name":"exit"}],
-            "relocs":[{"name":"setlocale","vaddr":40864},{"name":"free","vaddr":40568},
-                {"name":"exit","vaddr":40900}]}"#;
-        let facts = rizin_facts(export).ok_or("not a Rizin export")?;
+            {"offset":9616,"name":"fcn.00002590","callrefs":[]}]"#;
+        let facts = rizin_facts("rizin 0.9.1", output)?;
+        assert_eq!(facts.tool, "rizin 0.9.1 (iIj; iTj; iij; irj; aaa; aflj)");
         // Only imports that are called are kept.
         assert_eq!(
-            facts.imports.into_iter().collect::<Vec<_>>(),
-            [(40864, "setlocale".to_owned()), (40900, "exit".to_owned())]
+            facts.imports.iter().collect::<Vec<_>>(),
+            [
+                (&40864, &"setlocale".to_owned()),
+                (&40900, &"exit".to_owned())
+            ]
         );
-        let stored = serde_json::to_vec(&rizin_facts(export).ok_or("not a Rizin export")?)?;
-        // Stored facts are not mistaken for an export to import again.
-        assert!(rizin_facts(&stored).is_none());
+        let stored = serde_json::to_vec(&facts)?;
+        // Output cut short, or of a file with no code, is refused, not stored as empty facts.
+        assert!(rizin_facts("rizin", &output[..90]).is_err());
+        assert!(rizin_facts("rizin", br#"{"bintype":"elf"} {"sha256":"31"} [] [] []"#).is_err());
+        // Rizin finds "functions" in any bytes; a file of no known format is refused.
+        let text = br#"{"bintype":null} {"sha256":"31"} [] [] [{"offset":0,"name":"fcn.0"}]"#;
+        assert!(rizin_facts("rizin", text).is_err());
         let check = |caller, callee, kind| {
             let claim = ClaimKind::CallEdge(ledger_core::CallEdge {
                 binary: "true".into(),

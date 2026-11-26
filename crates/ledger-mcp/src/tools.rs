@@ -654,34 +654,51 @@ pub fn explain(store: &Store, claim: &str) -> Result<String, Rejection> {
     Ok(stamp(&snapshot, &out))
 }
 
-/// Stores a Rizin export as the facts it holds: its functions and direct calls.
-fn add_rizin_facts(store: &Store, facts: &BinaryFacts) -> Result<String, Rejection> {
-    let stored = rmcp::serde_json::to_vec(facts).map_err(|e| StoreError::Core(e.into()))?;
+/// Stores what Rizin printed for a program as the facts it holds: its functions and
+/// direct calls.
+///
+/// # Errors
+/// The output is not what the import expects, or it cannot be stored.
+pub fn add_rizin_output(store: &Store, tool: &str, output: &[u8]) -> Result<String, Rejection> {
+    let facts = rizin_facts(tool, output).map_err(|why| {
+        reject(
+            "tool_output_unreadable",
+            "rizin",
+            format!("Rizin's output cannot be used: {why}."),
+            "Nothing was recorded. Check that the file is a program Rizin can read, then tell the human.",
+        )
+    })?;
+    let stored = rmcp::serde_json::to_vec(&facts).map_err(|e| StoreError::Core(e.into()))?;
     let id = store.add_evidence(EvidenceKind::BinaryFacts, &stored)?;
     let calls: usize = facts.functions.iter().map(|f| f.calls.len()).sum();
     let body = format!(
-        "evidence {}\nimported from the Rizin export of binary sha256 {3}: functions {1}, direct calls {calls}, called imports {2}",
+        "evidence {}\nRizin recovered from the program with sha256 {}: functions {}, direct calls {calls}, called imports {}",
         short(id.as_str()),
+        short(&facts.sha256),
         facts.functions.len(),
         facts.imports.len(),
-        short(&facts.sha256)
     );
     Ok(stamp(&store.snapshot(), &body))
 }
 
 /// Stores a local capture file as evidence and returns its id. A HAR file given
-/// as `http_exchange` is split into one piece of evidence per entry, and a Rizin
-/// export given as `binary_facts` is cut down to its functions and calls.
+/// as `http_exchange` is split into one piece of evidence per entry. A file given
+/// as `binary_facts` must hold facts already; a program is analysed first, see
+/// [`add_rizin_output`].
 ///
 /// # Errors
-/// The file cannot be read or stored.
+/// The file cannot be read or stored, or is not in the format its kind requires.
 pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<String, Rejection> {
-    let export = (kind == EvidenceKind::BinaryFacts)
-        .then(|| std::fs::read(path).ok())
-        .flatten()
-        .and_then(|bytes| rizin_facts(&bytes));
-    if let Some(facts) = export {
-        return add_rizin_facts(store, &facts);
+    if kind == EvidenceKind::BinaryFacts {
+        let bytes = std::fs::read(path).map_err(StoreError::Io)?;
+        if rmcp::serde_json::from_slice::<BinaryFacts>(&bytes).is_err() {
+            return Err(reject(
+                "evidence_malformed",
+                "path",
+                "The file is not in the format its kind requires.",
+                "Nothing was recorded. Give the program file itself, or facts in the format this server stores.",
+            ));
+        }
     }
     let har = (kind == EvidenceKind::HttpExchange)
         .then(|| std::fs::read(path).ok())
@@ -1010,25 +1027,43 @@ mod tests {
     fn a_rizin_export_is_imported_and_call_edges_replay_on_it() -> TestResult {
         let dir = tempfile::tempdir()?;
         let store = Store::open(dir.path().join("l.db"))?;
-        // The shape `scripts/rizin-facts.sh` writes; fields the import ignores are left in.
-        let export = rmcp::serde_json::json!({
-            "tool": "rizin 0.9.1 @ linux-x86-64 (aaa)",
-            "hashes": {"md5": "b6e0", "sha256": "3141dd3506805dc7a68851abaf0bd3fd8466ca0ff1746f61c8243e2a869f55e0"},
-            "imports": [{"ordinal": 1, "name": "setlocale"}],
-            "relocs": [{"name": "setlocale", "type": "R_X86_64_GLOB_DAT", "vaddr": 40864}],
-            "functions": [
+        // What Rizin prints, one value per command; fields the import ignores are left in.
+        let output = rmcp::serde_json::json!([
+            {"bintype": "elf", "arch": "x86", "bits": 64},
+            {"md5": "b6e0", "sha256": "3141dd3506805dc7a68851abaf0bd3fd8466ca0ff1746f61c8243e2a869f55e0"},
+            [{"ordinal": 1, "name": "setlocale"}],
+            [{"name": "setlocale", "type": "R_X86_64_GLOB_DAT", "vaddr": 40864}],
+            [
                 {"offset": 9344, "name": "main", "size": 262, "callrefs": [
                     {"from": 9350, "to": 40864, "type": "CALL"},
                     {"from": 9360, "to": 9616, "type": "CALL"}]},
                 {"offset": 9616, "name": "fcn.00002590", "size": 40},
             ],
-        });
-        let file = dir.path().join("true.facts.json");
-        std::fs::write(&file, export.to_string())?;
-        let path = file.to_str().ok_or("path")?;
-        let added = add_evidence(&store, EvidenceKind::BinaryFacts, path);
+        ]);
+        let lines: Vec<String> = (output.as_array().into_iter().flatten())
+            .map(ToString::to_string)
+            .collect();
+        let (tool, output) = ("rizin 0.9.1 @ linux-x86-64", lines.join("\n"));
+        let added = add_rizin_output(&store, tool, output.as_bytes());
         let added = added.map_err(|r| r.to_string())?;
         let facts = id_in(&added).to_owned();
+        // Facts exported before can be added as a file; anything else under that kind cannot.
+        let stored = rmcp::serde_json::to_vec(&rizin_facts(tool, output.as_bytes())?)?;
+        let file = dir.path().join("true.facts.json");
+        std::fs::write(&file, &stored)?;
+        let again = add_evidence(
+            &store,
+            EvidenceKind::BinaryFacts,
+            file.to_str().ok_or("path")?,
+        );
+        assert_eq!(id_in(&again.map_err(|r| r.to_string())?), facts);
+        std::fs::write(&file, "{\"functions\": 3}")?;
+        let wrong = add_evidence(
+            &store,
+            EvidenceKind::BinaryFacts,
+            file.to_str().ok_or("path")?,
+        );
+        assert_eq!(wrong.err().map(|r| r.code), Some("evidence_malformed"));
         let calls = |caller: &str, callee: &str| Claim {
             kind: ClaimKind::CallEdge(ledger_core::CallEdge {
                 binary: "true".into(),
@@ -1037,7 +1072,7 @@ mod tests {
             }),
             premises: BTreeSet::new(),
         };
-        let mut log = format!("add_evidence true.facts.json\n{added}\n\n");
+        let mut log = format!("add_evidence, a program Rizin has analysed\n{added}\n\n");
         let mut say = |what: &str, result: Result<String, Rejection>| {
             let text = result.unwrap_or_else(|r| format!("REJECTED {r}"));
             let _ = write!(log, "{what}\n{text}\n\n");
