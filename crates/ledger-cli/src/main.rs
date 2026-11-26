@@ -57,7 +57,11 @@ fn snapshot_files(dir: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
         };
         if subdir.is_dir() {
             for file in std::fs::read_dir(&subdir)? {
-                files.push((type_name.to_owned(), file?.path()));
+                let file = file?.path();
+                // Only files are snapshots; a directory inside cannot be read as one.
+                if file.is_file() {
+                    files.push((type_name.to_owned(), file));
+                }
             }
         }
     }
@@ -95,4 +99,23 @@ fn main() -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_files;
+
+    #[test]
+    fn a_subdirectory_of_a_type_directory_is_not_a_snapshot() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let player = dir.path().join("Player");
+        std::fs::create_dir_all(player.join("older"))?;
+        std::fs::write(player.join("one.bin"), [0u8; 4])?;
+        std::fs::write(dir.path().join("notes.txt"), "not a type")?;
+        assert_eq!(
+            snapshot_files(dir.path())?,
+            [("Player".to_owned(), player.join("one.bin"))]
+        );
+        Ok(())
+    }
 }

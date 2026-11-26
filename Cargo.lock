@@ -985,6 +985,7 @@ dependencies = [
  "ledger-checkers",
  "ledger-core",
  "ledger-store",
+ "tempfile",
 ]
 
 [[package]]

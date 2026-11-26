@@ -84,7 +84,7 @@ From `cargo tree -p <crate> --depth 1`:
 | `ledger-store` | flume 0.12.0, jiff 1.0.3, ledger-core (path), ledger-os (path), rusqlite 0.43.0 (bundled), serde_json 1.0.154, thiserror 2.0.21, tracing 0.1.44 | proptest 1.12.0, tempfile 3.27.0 |
 | `ledger-checkers` | base64 0.23.1, hex 0.4.3, hmac 0.13.0, jsonschema 0.63.1 (no default features), ledger-core (path), md-5 0.11.0, rayon 1.12.0, serde 1.0.229 (derive), serde_json 1.0.154, sha1 0.11.0, sha2 0.11.2, thiserror 2.0.21, tracing 0.1.44 | – |
 | `ledger-mcp` | anyhow 1.0.105, ledger-checkers (path), ledger-core (path), ledger-os (path), ledger-store (path), rmcp 3.11.0 (server, macros, transport-io), schemars 1.2.3, tokio 1.54.1 (rt, macros, io-std, process, time, sync), tracing 0.1.44, tracing-subscriber 0.3.23 | insta 1.49.0, tempfile 3.27.0 |
-| `ledger-cli` | anyhow 1.0.105, clap 4.6.10, ledger-checkers (path), ledger-core (path), ledger-store (path) | – |
+| `ledger-cli` | anyhow 1.0.105, clap 4.6.10, ledger-checkers (path), ledger-core (path), ledger-store (path) |tempfile 3.27.0 |
 | `ledger-bench` | ledger-core (path), ledger-store (path), rusqlite 0.43.0 (bundled) | tempfile 3.27.0 |
 
 ## Running

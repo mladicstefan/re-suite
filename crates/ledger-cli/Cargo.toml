@@ -13,3 +13,6 @@ ledger-store = { version = "0.1.0", path = "../ledger-store" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
