@@ -21,3 +21,6 @@ evidence_unreadable [path]: No such file or directory (os error 2). Next: Check 
 claim_unknown []: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
 claim_unknown []: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
 evidence_unknown []: No evidence has this id. Next: Call add_evidence with the capture file first.
+evidence_unreadable [path]: It is not a regular file. Next: Check that the path is a local file this server can read.
+evidence_too_large [path]: 268435457 bytes, limit 268435456. Next: Nothing was recorded. Give a smaller file, such as a HAR file of fewer requests, or tell the human.
+evidence_too_large [path]: 16777217 bytes, limit 16777216. Next: Nothing was recorded. Give a smaller file, such as a HAR file of fewer requests, or tell the human.

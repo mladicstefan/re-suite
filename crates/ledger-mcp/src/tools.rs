@@ -4,10 +4,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
+use std::io::Read as _;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use ledger_checkers::{CheckError, check_claim, checker_of, har_exchanges, is_about, rizin_facts};
+use ledger_checkers::{
+    CheckError, MAX_PARSED_EVIDENCE, check_claim, checker_of, har_exchanges, is_about, rizin_facts,
+};
 use ledger_core::{
     BinaryFacts, CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event, EvidenceId,
     EvidenceKind, HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict, admit,
@@ -26,6 +29,10 @@ const LISTED: usize = 5;
 /// Differences from a refuted claim listed before the rest are counted.
 const SHOWN: usize = 3;
 const CHECK_LIMIT: Duration = Duration::from_secs(5);
+/// Largest HAR file `add_evidence` reads. A HAR file records a whole browser session,
+/// many exchanges each within [`MAX_PARSED_EVIDENCE`], so it may be larger than any
+/// one capture; it is parsed whole, which takes a few times its size in memory.
+const MAX_HAR: u64 = 256 << 20;
 
 /// A refusal an agent can act on: a stable code, what it is about, and what to do next.
 #[derive(Debug)]
@@ -695,6 +702,32 @@ pub fn add_rizin_output(store: &Store, tool: &str, output: &[u8]) -> Result<Stri
     Ok(stamp(&store.snapshot(), &body))
 }
 
+/// The bytes of a file that is parsed whole: a regular file of at most `max` bytes.
+fn read_whole(path: &str, max: u64) -> Result<Vec<u8>, Rejection> {
+    let meta = std::fs::metadata(path).map_err(StoreError::Io)?;
+    if !meta.is_file() {
+        return Err(reject(
+            "evidence_unreadable",
+            "path",
+            "It is not a regular file.",
+            "Check that the path is a local file this server can read.",
+        ));
+    }
+    if meta.len() > max {
+        return Err(reject(
+            "evidence_too_large",
+            "path",
+            format!("{} bytes, limit {max}.", meta.len()),
+            "Nothing was recorded. Give a smaller file, such as a HAR file of fewer requests, or tell the human.",
+        ));
+    }
+    // The file can grow after it was measured; no more than the limit is read either way.
+    let mut bytes = Vec::new();
+    let file = std::fs::File::open(path).map_err(StoreError::Io)?;
+    (file.take(max).read_to_end(&mut bytes)).map_err(StoreError::Io)?;
+    Ok(bytes)
+}
+
 /// Stores a local capture file as evidence and returns its id. A HAR file given
 /// as `http_exchange` is split into one piece of evidence per entry. A file given
 /// as `binary_facts` must hold facts already; a program is analysed first, see
@@ -704,7 +737,7 @@ pub fn add_rizin_output(store: &Store, tool: &str, output: &[u8]) -> Result<Stri
 /// The file cannot be read or stored, or is not in the format its kind requires.
 pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<String, Rejection> {
     if kind == EvidenceKind::BinaryFacts {
-        let bytes = std::fs::read(path).map_err(StoreError::Io)?;
+        let bytes = read_whole(path, MAX_PARSED_EVIDENCE as u64)?;
         if rmcp::serde_json::from_slice::<BinaryFacts>(&bytes).is_err() {
             return Err(reject(
                 "evidence_malformed",
@@ -715,8 +748,8 @@ pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<Str
         }
     }
     let har = (kind == EvidenceKind::HttpExchange)
-        .then(|| std::fs::read(path).ok())
-        .flatten()
+        .then(|| read_whole(path, MAX_HAR))
+        .transpose()?
         .and_then(|bytes| har_exchanges(&bytes));
     let Some(exchanges) = har else {
         let id = store.add_evidence_file(kind, path)?;
@@ -916,6 +949,15 @@ mod tests {
         let lone = Store::open(dir.path().join("lone.db"))?;
         add_evidence(&lone, EvidenceKind::Secret, key_path).map_err(|r| r.to_string())?;
         propose(&lone, layout("T", 8, &[])?, &[]).map_err(|r| r.to_string())?;
+        // Files one byte over the limits for files read whole, made without writing them.
+        let sparse = |name: &str, len: u64| -> Result<String, Box<dyn std::error::Error>> {
+            let file = dir.path().join(name);
+            std::fs::File::create(&file)?.set_len(len)?;
+            Ok(file.to_str().ok_or("path")?.to_owned())
+        };
+        let big_har = sparse("big.har", MAX_HAR + 1)?;
+        let big_facts = sparse("big.facts.json", MAX_PARSED_EVIDENCE as u64 + 1)?;
+        let dir_path = dir.path().to_str().ok_or("path")?;
         let signature = |endpoint: &str, key: &EvidenceId| Claim {
             kind: ClaimKind::RequestSignature(RequestSignature {
                 endpoint: endpoint.into(),
@@ -959,6 +1001,9 @@ mod tests {
             rejected(explain(&lone, "")),
             rejected(retract(&lone, "", String::new())),
             rejected(propose(&lone, layout("U", 8, &[])?, &[String::new()])),
+            rejected(add_evidence(&store, EvidenceKind::HttpExchange, dir_path)),
+            rejected(add_evidence(&store, EvidenceKind::HttpExchange, &big_har)),
+            rejected(add_evidence(&store, EvidenceKind::BinaryFacts, &big_facts)),
         ];
         insta::assert_snapshot!("rejections", all.join("\n"));
         Ok(())
