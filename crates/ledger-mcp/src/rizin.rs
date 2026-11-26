@@ -111,3 +111,27 @@ pub async fn analyse(path: String) -> Result<Option<Analysis>, Rejection> {
         output: ran.stdout,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_local_file_is_located_and_only_a_program_is_analysed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A target Rizin would open as a debugger, and a file that is not there.
+        assert!(locate(Path::new("dbg:///usr/bin/true")).is_err());
+        let dir = tempfile::tempdir()?;
+        assert!(locate(&dir.path().join("missing")).is_err());
+        let facts = dir.path().join("true.facts.json");
+        std::fs::write(&facts, b"{\"functions\": []}")?;
+        assert!(
+            !locate(&facts)?.1,
+            "facts exported before are not a program"
+        );
+        // Tests run in the crate's directory, so this path is relative.
+        let (path, program) = locate(Path::new("Cargo.toml"))?;
+        assert!(program && path.is_absolute(), "{}", path.display());
+        Ok(())
+    }
+}
