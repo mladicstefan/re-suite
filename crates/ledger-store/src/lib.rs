@@ -2,11 +2,13 @@
 //! an append-only event log, a published in-memory snapshot for readers and an
 //! index of evidence files that live on disk under their content hash.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::thread::JoinHandle;
+use std::time::SystemTime;
 
 use ledger_core::{CoreError, Event, EvidenceId, EvidenceKind, HttpExchange, Ledger};
 use rusqlite::{Connection, OpenFlags, params};
@@ -133,7 +135,11 @@ pub struct Store {
     /// Held until the writer has stopped. A second store on the file would trust its own
     /// copy of the ledger and could log the same event twice, which no later open replays.
     _lock: File,
+    verified: Verified,
 }
+
+/// Evidence whose file was hashed, with the length and modification time it had then.
+type Verified = Mutex<HashMap<EvidenceId, (u64, SystemTime)>>;
 
 impl Store {
     /// Opens or creates a ledger file in WAL mode, replays its events through
@@ -204,6 +210,7 @@ impl Store {
             tx: Some(tx),
             writer: Some(writer),
             _lock: lock,
+            verified: Verified::default(),
         })
     }
 
@@ -336,11 +343,13 @@ impl Store {
     }
 
     /// Evidence bytes by hash, verified against that hash. `None` if there is no such file.
+    /// A file is hashed on its first read and again only once its length or modification
+    /// time is no longer what it was then.
     ///
     /// # Errors
     /// The file cannot be mapped, or its content no longer matches its name.
     pub fn evidence(&self, id: &EvidenceId) -> Result<Option<Evidence>, StoreError> {
-        read_evidence(&self.evidence_dir, id)
+        read_evidence(&self.evidence_dir, id, &self.verified)
     }
 }
 
@@ -353,23 +362,39 @@ pub fn evidence_at(
     ledger: impl AsRef<Path>,
     id: &EvidenceId,
 ) -> Result<Option<Evidence>, StoreError> {
-    read_evidence(&sidecar(ledger.as_ref(), ".evidence"), id)
+    // Nothing verified before, so every read hashes.
+    read_evidence(
+        &sidecar(ledger.as_ref(), ".evidence"),
+        id,
+        &Verified::default(),
+    )
 }
 
-fn read_evidence(dir: &Path, id: &EvidenceId) -> Result<Option<Evidence>, StoreError> {
+fn read_evidence(
+    dir: &Path,
+    id: &EvidenceId,
+    verified: &Verified,
+) -> Result<Option<Evidence>, StoreError> {
     // Ids arrive from agents; only a hex name can be one of our files.
     if !id.as_str().bytes().all(|b| b.is_ascii_hexdigit()) {
         return Ok(None);
     }
-    // SAFETY: evidence files are written once under a temporary name, renamed into
-    // place and never modified afterwards.
-    let map = match unsafe { ledger_os::map(&dir.join(id.as_str())) } {
-        Ok(map) => map,
+    let path = dir.join(id.as_str());
+    // Taken before the file is mapped and hashed, so any later change shows as a new stamp.
+    let stamp = match std::fs::metadata(&path) {
+        Ok(meta) => (meta.len(), meta.modified()?),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    if EvidenceId::of(&map) != *id {
-        return Err(StoreError::Corrupt(id.clone()));
+    // SAFETY: evidence files are written once under a temporary name, renamed into
+    // place and never modified afterwards.
+    let map = unsafe { ledger_os::map(&path)? };
+    let cache = || verified.lock().unwrap_or_else(PoisonError::into_inner);
+    if cache().get(id) != Some(&stamp) {
+        if EvidenceId::of(&map) != *id {
+            return Err(StoreError::Corrupt(id.clone()));
+        }
+        cache().insert(id.clone(), stamp);
     }
     Ok(Some(Evidence(map)))
 }
@@ -892,6 +917,39 @@ mod tests {
         assert_eq!(store.evidence(&id)?.as_deref(), Some(&b"snapshot"[..]));
         // Nothing but the evidence itself is left in the directory.
         assert_eq!(fs::read_dir(sidecar(&db, ".evidence"))?.count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_is_hashed_again_only_when_its_file_changes() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("l.db");
+        let store = Store::open(&db)?;
+        let id = store.add_evidence(EvidenceKind::MemorySnapshot, b"snapshot")?;
+        let file = sidecar(&db, ".evidence").join(id.as_str());
+        assert!(store.evidence(&id)?.is_some());
+        // The price of not hashing again: a rewrite that keeps the length and the
+        // modification time is taken for the file this store already checked.
+        let modified = fs::metadata(&file)?.modified()?;
+        fs::write(&file, b"SNAPSHOT")?;
+        fs::File::options()
+            .write(true)
+            .open(&file)?
+            .set_modified(modified)?;
+        assert_eq!(store.evidence(&id)?.as_deref(), Some(&b"SNAPSHOT"[..]));
+        // Without a store, every read hashes.
+        assert!(matches!(evidence_at(&db, &id), Err(StoreError::Corrupt(_))));
+        // A new modification time or a new length is hashed again.
+        let later = modified + std::time::Duration::from_secs(1);
+        fs::File::options()
+            .write(true)
+            .open(&file)?
+            .set_modified(later)?;
+        assert!(matches!(store.evidence(&id), Err(StoreError::Corrupt(_))));
+        fs::write(&file, b"snapshot")?;
+        assert!(store.evidence(&id)?.is_some());
+        fs::write(&file, b"snapshot, changed")?;
+        assert!(matches!(store.evidence(&id), Err(StoreError::Corrupt(_))));
         Ok(())
     }
 
