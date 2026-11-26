@@ -87,6 +87,19 @@ impl From<StoreError> for Rejection {
                 "The stored file no longer matches its hash.",
                 "Add the capture again from its original file and tell the human.",
             ),
+            StoreError::OtherKind(id, kind) => {
+                // The kind as agents write it, `memory_snapshot`, not as the code names it.
+                let kind = rmcp::serde_json::to_value(kind).unwrap_or_default();
+                reject(
+                    "evidence_other_kind",
+                    id,
+                    format!(
+                        "These bytes are already stored as {}, and stored evidence keeps its kind.",
+                        kind.as_str().unwrap_or("another kind")
+                    ),
+                    "Nothing was recorded. Cite the evidence under the kind it has, or tell the human if that kind is wrong.",
+                )
+            }
             StoreError::Io(e) => reject(
                 "evidence_unreadable",
                 "path",
@@ -1032,6 +1045,7 @@ mod tests {
                 EvidenceKind::MemorySnapshot,
                 "/no/such/capture.bin",
             )),
+            rejected(add_evidence(&lone, EvidenceKind::MemorySnapshot, key_path)),
             rejected(explain(&lone, "")),
             rejected(retract(&lone, "", String::new())),
             rejected(propose(&lone, layout("U", 8, &[])?, &[String::new()])),

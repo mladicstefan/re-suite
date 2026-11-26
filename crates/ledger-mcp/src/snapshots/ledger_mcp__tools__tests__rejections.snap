@@ -18,6 +18,7 @@ claim_unknown [0123abcd]: No claim has this id. Next: Use ask with about=all to 
 claim_unknown []: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
 claim_unknown [0123abcd]: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
 evidence_unreadable [path]: No such file or directory (os error 2). Next: Check that the path is a local file this server can read.
+evidence_other_kind [3806d4b7938d]: These bytes are already stored as secret, and stored evidence keeps its kind. Next: Nothing was recorded. Cite the evidence under the kind it has, or tell the human if that kind is wrong.
 claim_unknown []: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
 claim_unknown []: No claim has this id. Next: Use ask with about=all to list claims, or propose the claim first.
 evidence_unknown []: No evidence has this id. Next: Call add_evidence with the capture file first.
