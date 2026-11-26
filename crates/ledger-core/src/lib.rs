@@ -1211,9 +1211,10 @@ impl<'a> Endpoint<'a> {
         {
             return Err("an endpoint has no spaces and no fragment");
         }
-        let named = |condition: &str| {
-            let name = condition.trim_start_matches('!').split('=').next();
-            !name.unwrap_or_default().is_empty()
+        // `!name=value` is refused: "absent" is about a name, not about one of its values.
+        let named = |condition: &str| match condition.strip_prefix('!') {
+            Some(name) => !name.is_empty() && !name.contains(['=', '!']),
+            None => !condition.is_empty() && !condition.starts_with('='),
         };
         if conditions.is_some_and(|c| !c.split('&').all(named)) {
             return Err("query conditions are `name`, `name=value` or `!name`, joined by `&`");
@@ -1845,6 +1846,14 @@ mod tests {
         assert!(Event::decode(r#"{"event":"proposed","claim":{"kind":"no_such_kind"}}"#).is_err());
         assert!(Event::decode(r#"{"event":"no_such_event"}"#).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn a_condition_cannot_negate_a_value() {
+        // `!a=1` used to be accepted and then looked for a parameter named `a=1`,
+        // so it matched requests with and without `a=1` alike.
+        assert!(Endpoint::parse("GET /x?!a=1").is_err());
+        assert!(Endpoint::parse("GET /x?a=1&!b").is_ok());
     }
 
     #[test]
