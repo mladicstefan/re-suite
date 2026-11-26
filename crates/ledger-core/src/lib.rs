@@ -1299,6 +1299,14 @@ pub enum Event {
     Proposed {
         claim: WellFormed<Claim>,
     },
+    /// A stored proposal that today's admission rules refuse: it was admitted under
+    /// earlier ones. Only [`Event::decode`] builds it and it is never written, so the
+    /// log keeps the proposal as it was filed. The claim stays in the ledger, withdrawn.
+    #[serde(skip)]
+    Lapsed {
+        claim: Claim,
+        reason: String,
+    },
     EvidenceAdded {
         id: EvidenceId,
         kind: EvidenceKind,
@@ -1324,10 +1332,31 @@ impl Event {
         Ok(serde_json::to_string(self)?)
     }
 
+    /// A proposal that fails admission is not an error: see [`Event::Lapsed`].
+    /// Tightening a rule must not make a ledger unreadable.
+    ///
     /// # Errors
-    /// Malformed JSON or a claim that fails admission.
+    /// Malformed JSON, or an event or claim of a kind this version does not know.
     pub fn decode(s: &str) -> Result<Self, CoreError> {
-        Ok(serde_json::from_str(s)?)
+        #[derive(Deserialize)]
+        #[serde(tag = "event", rename_all = "snake_case")]
+        enum Stored {
+            Proposed {
+                claim: Claim,
+            },
+            #[serde(other)]
+            Other,
+        }
+        let refused = match serde_json::from_str(s) {
+            Ok(event) => return Ok(event),
+            Err(refused) => refused,
+        };
+        if let Ok(Stored::Proposed { claim }) = serde_json::from_str(s)
+            && let Err(CoreError::Inadmissible(reason)) = admit(claim.clone())
+        {
+            return Ok(Self::Lapsed { claim, reason });
+        }
+        Err(refused.into())
     }
 }
 
@@ -1473,13 +1502,15 @@ struct Entry {
     /// For each verdict, in step with `verdicts`: the evidence its check read and the checker.
     checks: Vec<(BTreeSet<EvidenceId>, Option<CheckerRef>)>,
     retracted: bool,
+    /// Why today's admission rules refuse this claim, if it was admitted under earlier ones.
+    lapsed: Option<String>,
 }
 
 impl Entry {
     /// This claim's status, given the statuses of its premises.
     fn status(&self, premise: impl Fn(usize) -> Status) -> Status {
         let any = |f: fn(&Verdict) -> bool| self.verdicts.iter().any(f);
-        if self.retracted {
+        if self.retracted || self.lapsed.is_some() {
             Status::Retracted
         } else if any(|v| matches!(v, Verdict::Refuted { .. })) {
             Status::Refuted
@@ -1512,25 +1543,8 @@ impl Ledger {
     /// Unknown claim/evidence references or a duplicate proposal.
     pub fn apply(&mut self, event: Event) -> Result<(), CoreError> {
         match event {
-            Event::Proposed { claim } => {
-                let claim = claim.0;
-                let id = claim.id()?;
-                if self.index.contains_key(&id) {
-                    return Err(CoreError::DuplicateClaim(id));
-                }
-                let premises = (claim.premises.iter())
-                    .map(|p| self.position(p))
-                    .collect::<Result<_, _>>()?;
-                self.index.insert(id.clone(), self.entries.len());
-                self.entries.push(Entry {
-                    id,
-                    claim,
-                    premises,
-                    verdicts: Vec::new(),
-                    checks: Vec::new(),
-                    retracted: false,
-                });
-            }
+            Event::Proposed { claim } => self.enter(claim.0, None)?,
+            Event::Lapsed { claim, reason } => self.enter(claim, Some(reason))?,
             Event::EvidenceAdded { id, kind } => {
                 self.evidence.insert(id, kind);
             }
@@ -1552,6 +1566,28 @@ impl Ledger {
                 self.entries[at].retracted = true;
             }
         }
+        Ok(())
+    }
+
+    /// Adds a claim. `lapsed` says why today's rules refuse it, if they do.
+    fn enter(&mut self, claim: Claim, lapsed: Option<String>) -> Result<(), CoreError> {
+        let id = claim.id()?;
+        if self.index.contains_key(&id) {
+            return Err(CoreError::DuplicateClaim(id));
+        }
+        let premises = (claim.premises.iter())
+            .map(|p| self.position(p))
+            .collect::<Result<_, _>>()?;
+        self.index.insert(id.clone(), self.entries.len());
+        self.entries.push(Entry {
+            id,
+            claim,
+            premises,
+            verdicts: Vec::new(),
+            checks: Vec::new(),
+            retracted: false,
+            lapsed,
+        });
         Ok(())
     }
 
@@ -1593,6 +1629,13 @@ impl Ledger {
         };
         let at = entry.checks.iter().rposition(|check| same(&check))?;
         entry.verdicts.get(at)
+    }
+
+    /// Why a claim that was admitted under earlier rules is refused by today's. Such a
+    /// claim counts as withdrawn.
+    #[must_use]
+    pub fn lapsed(&self, id: &ClaimId) -> Option<&str> {
+        self.entry(id)?.lapsed.as_deref()
     }
 
     #[must_use]
@@ -1775,6 +1818,33 @@ mod tests {
             }),
             premises: BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn a_stored_claim_the_rules_now_refuse_stays_in_the_ledger_withdrawn() -> Result<(), CoreError>
+    {
+        // A field outside its type: refused today, and standing in for any claim that
+        // was admitted before a rule was tightened.
+        let claim = r#"{"kind":"memory_layout","type_name":"Player","size":4,"fields":[{"name":"hp","offset":8,"len":4}],"premises":[]}"#;
+        let event = Event::decode(&format!(r#"{{"event":"proposed","claim":{claim}}}"#))?;
+        let mut ledger = Ledger::default();
+        ledger.apply(event.clone())?;
+        let id = ledger.claims().map(|(id, _)| id.clone()).next();
+        let id = id.ok_or_else(|| CoreError::Inadmissible("the claim was not loaded".into()))?;
+        assert_eq!(ledger.status(&id), Some(Status::Retracted));
+        assert!(ledger.lapsed(&id).is_some_and(|why| why.contains("hp")));
+        // The log already holds the proposal; the loaded form is never written again.
+        assert!(event.encode().is_err());
+        // Events that name the claim still apply, so the rest of the log replays.
+        ledger.apply(Event::Retracted {
+            claim: id,
+            reason: "second look".into(),
+        })?;
+        // A new proposal still has to pass admission, and other bad events are still errors.
+        assert!(serde_json::from_str::<WellFormed<Claim>>(claim).is_err());
+        assert!(Event::decode(r#"{"event":"proposed","claim":{"kind":"no_such_kind"}}"#).is_err());
+        assert!(Event::decode(r#"{"event":"no_such_event"}"#).is_err());
+        Ok(())
     }
 
     #[test]
@@ -2181,7 +2251,8 @@ mod tests {
     #[test]
     fn replayed_events_are_readmitted() {
         let bad = r#"{"event":"proposed","claim":{"kind":"memory_layout","type_name":"","size":0,"fields":[]}}"#;
-        assert!(Event::decode(bad).is_err());
+        // It is admitted again on the way in, and a failure never yields a live proposal.
+        assert!(matches!(Event::decode(bad), Ok(Event::Lapsed { .. })));
     }
 
     #[test]

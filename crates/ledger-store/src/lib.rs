@@ -810,8 +810,11 @@ mod tests {
             "INSERT INTO events (payload, recorded_at) VALUES (?1, '')",
             [zero_size],
         )?;
-        assert!(matches!(replay(&db), Err(StoreError::Core(_))));
-        assert!(Store::open(&db).is_err());
+        // The ledger still opens. The claim is in it, withdrawn, and can never be held.
+        let ledger = replay(&db)?.ledger;
+        let statuses: Vec<Status> = ledger.statuses().map(|(_, status)| status).collect();
+        assert_eq!(statuses, [Status::Retracted]);
+        assert_eq!(Store::open(&db)?.snapshot().ledger, ledger);
         Ok(())
     }
 

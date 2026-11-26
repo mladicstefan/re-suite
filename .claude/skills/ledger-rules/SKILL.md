@@ -28,6 +28,10 @@ These are invariants, not style. A change that breaks one is wrong even if CI pa
 ## One way in, one way to change
 - Nothing enters the ledger except through `admit`, which returns
   `WellFormed<Claim>`. Do not add another constructor for `WellFormed`.
+- Stored proposals are admitted again when a ledger loads. One that today's
+  rules refuse is loaded as withdrawn (`Event::Lapsed`), never as a live
+  claim and never as an error: tightening a rule must not make a ledger
+  unreadable.
 - The ledger changes only through `Event`s applied by `Ledger::apply`.
   The events table is append-only; never UPDATE or DELETE it.
 
