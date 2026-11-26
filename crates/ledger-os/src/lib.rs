@@ -80,6 +80,24 @@ pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     sync_dir(parent(dir))
 }
 
+/// Locks the file `path`, created if it is not there, for as long as the returned
+/// file stays open. `None` if it is locked already, by this process or another.
+///
+/// # Errors
+/// The file cannot be created or opened, or the system cannot lock it.
+pub fn lock(path: &Path) -> io::Result<Option<File>> {
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(e)) => Err(e),
+    }
+}
+
 /// The directory a path's last name lives in. A bare name lives in the current one.
 fn parent(path: &Path) -> &Path {
     match path.parent() {

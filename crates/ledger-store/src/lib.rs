@@ -2,6 +2,7 @@
 //! an append-only event log, a published in-memory snapshot for readers and an
 //! index of evidence files that live on disk under their content hash.
 
+use std::fs::File;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -36,6 +37,8 @@ pub enum StoreError {
     Corrupt(EvidenceId),
     #[error("writer thread is gone")]
     Closed,
+    #[error("ledger file {} is already open in another store", .0.display())]
+    InUse(PathBuf),
 }
 
 // `kind` is generated from the payload so the two can never disagree.
@@ -125,15 +128,20 @@ pub struct Store {
     published: Arc<RwLock<Arc<Snapshot>>>,
     tx: Option<flume::Sender<Job>>,
     writer: Option<JoinHandle<()>>,
+    /// Held until the writer has stopped. A second store on the file would trust its own
+    /// copy of the ledger and could log the same event twice, which no later open replays.
+    _lock: File,
 }
 
 impl Store {
     /// Opens or creates a ledger file in WAL mode, replays its events through
     /// ledger-core and starts the writer thread. Evidence files go in the
-    /// sibling directory `<path>.evidence`.
+    /// sibling directory `<path>.evidence`. The store locks `<path>.lock` while it is
+    /// open; [`replay`] and [`evidence_at`] need no lock.
     ///
     /// # Errors
-    /// The file cannot be opened, has another schema version, or its events no longer replay.
+    /// The file cannot be opened, another store has it open, it has another schema
+    /// version, or its events no longer replay.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         Self::open_with(path.as_ref(), "FULL")
     }
@@ -149,6 +157,8 @@ impl Store {
 
     fn open_with(path: &Path, synchronous: &str) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
+        let lock = ledger_os::lock(&sidecar(path, ".lock"))?
+            .ok_or_else(|| StoreError::InUse(path.to_path_buf()))?;
         // Where the system's flush stops short of the disk, FULL has to ask for a real one.
         let durable = if synchronous == "FULL" {
             ledger_os::SQLITE_DURABLE
@@ -191,6 +201,7 @@ impl Store {
             published,
             tx: Some(tx),
             writer: Some(writer),
+            _lock: lock,
         })
     }
 
@@ -766,6 +777,23 @@ mod tests {
         Connection::open(&db)?.pragma_update(None, "user_version", 99)?;
         assert!(matches!(Store::open(&db), Err(StoreError::Schema(99))));
         assert!(matches!(replay(&db), Err(StoreError::Schema(99))));
+        Ok(())
+    }
+
+    #[test]
+    fn a_ledger_file_is_open_in_one_store_at_a_time() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("l.db");
+        let store = Store::open(&db)?;
+        store.append(proposed(0, None)?)?;
+        let ev = store.add_evidence(EvidenceKind::MemorySnapshot, b"x")?;
+        assert!(matches!(Store::open(&db), Err(StoreError::InUse(_))));
+        assert!(matches!(Store::open_bulk(&db), Err(StoreError::InUse(_))));
+        // Reading needs no store, so it works while one is open.
+        assert_eq!(replay(&db)?, *store.snapshot());
+        assert!(evidence_at(&db, &ev)?.is_some());
+        drop(store);
+        assert_eq!(Store::open(&db)?.snapshot().seq, 2);
         Ok(())
     }
 
