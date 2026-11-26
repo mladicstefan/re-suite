@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use ledger_checkers::{
-    CheckError, MAX_PARSED_EVIDENCE, check_claim, checker_of, har_exchanges, is_about, rizin_facts,
+    CHECKERS, CheckError, MAX_PARSED_EVIDENCE, check_claim, checker_of, har_exchanges, is_about,
+    rizin_facts,
 };
 use ledger_core::{
     BinaryFacts, CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event, EvidenceId,
@@ -399,9 +400,9 @@ pub fn propose(store: &Store, mut claim: Claim, evidence: &[String]) -> Result<S
     let after = store.snapshot();
     let mut out = row_of(&after.ledger, &id);
     // The first refutation is why the claim is refuted, whatever was checked after it.
-    let refuted =
-        (after.ledger.verdicts(&id).iter()).find(|v| matches!(v, Verdict::Refuted { .. }));
-    if let Some(Verdict::Refuted { counterexample: c }) = refuted {
+    let refuted = (after.ledger.current_verdicts(&id))
+        .find(|(v, counts)| *counts && matches!(v, Verdict::Refuted { .. }));
+    if let Some((Verdict::Refuted { counterexample: c }, _)) = refuted {
         let _ = write!(
             out,
             "\nrefuted by {}: {}",
@@ -633,6 +634,9 @@ pub fn explain(store: &Store, claim: &str) -> Result<String, Rejection> {
     let Some(claim) = ledger.claim(&id) else {
         return Ok(stamp(&snapshot, &out));
     };
+    if let Some(why) = ledger.lapsed(&id) {
+        let _ = write!(out, "\nwithdrawn: today's rules no longer admit it: {why}");
+    }
     if let Some(why) = holding(ledger, claim) {
         let _ = write!(out, "\n{why}");
     }
@@ -642,16 +646,19 @@ pub fn explain(store: &Store, claim: &str) -> Result<String, Rejection> {
     for premise in claim.premises.iter().take(LISTED) {
         let _ = write!(out, "\npremise: {}", row_of(ledger, premise));
     }
-    let verdicts = ledger.verdicts(&id);
+    // Each verdict with whether it still counts: one from a checker version that is
+    // no longer current does not.
+    let verdicts: Vec<(&Verdict, bool)> = ledger.current_verdicts(&id).collect();
     let mut earlier = verdicts.len().saturating_sub(LISTED);
-    // The first refutation is why the claim is refuted, so it is listed even when older.
+    // The first refutation that counts is why the claim is refuted, so it is listed
+    // even when older.
     let refuted = verdicts
         .iter()
-        .position(|v| matches!(v, Verdict::Refuted { .. }));
+        .position(|(v, counts)| *counts && matches!(v, Verdict::Refuted { .. }));
     let first = refuted.filter(|&at| at < earlier);
     let listed = first.into_iter().chain(earlier..verdicts.len());
     earlier -= usize::from(first.is_some());
-    for verdict in listed.map(|at| &verdicts[at]) {
+    for (verdict, counts) in listed.map(|at| verdicts[at]) {
         let _ = match verdict {
             Verdict::Held { runs } => write!(out, "\nheld on {runs} runs (replayed, not proved)"),
             Verdict::Refuted { counterexample: c } => {
@@ -664,6 +671,9 @@ pub fn explain(store: &Store, claim: &str) -> Result<String, Rejection> {
             }
             Verdict::Inconclusive { reason } => write!(out, "\ninconclusive: {reason}"),
         };
+        if !counts {
+            out.push_str(" (by an older checker version: does not count)");
+        }
     }
     let more_premises = claim.premises.len().saturating_sub(LISTED);
     if earlier + more_premises > 0 {
@@ -674,8 +684,28 @@ pub fn explain(store: &Store, claim: &str) -> Result<String, Rejection> {
     }
     if verdicts.is_empty() {
         out.push_str("\nno checks yet: propose it again with evidence to replay it");
+    } else if !verdicts.iter().any(|(_, counts)| *counts) {
+        out.push_str(
+            "\nno check by a current checker: propose it again with evidence to replay it",
+        );
     }
     Ok(stamp(&snapshot, &out))
+}
+
+/// Writes this build's checkers and their versions to the log, unless the log lists
+/// exactly these already. From then on only their verdicts count, so a verdict from
+/// a checker that has since been fixed no longer decides a claim's status.
+///
+/// # Errors
+/// The write fails.
+pub fn record_checkers(store: &Store) -> Result<(), StoreError> {
+    let current: BTreeMap<String, u32> = (CHECKERS.iter())
+        .map(|(id, version)| ((*id).to_owned(), *version))
+        .collect();
+    if *store.snapshot().ledger.checkers() != current {
+        store.append(Event::CheckersSet { current })?;
+    }
+    Ok(())
 }
 
 /// Stores what Rizin printed for a program as the facts it holds: its functions and
@@ -1241,6 +1271,46 @@ mod tests {
             propose(&store, record(other), &evidence),
         );
         insta::assert_snapshot!("revision", log);
+        Ok(())
+    }
+
+    #[test]
+    fn a_verdict_from_another_checker_version_is_shown_as_not_counting() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        // The server lists its checkers when it starts, once.
+        record_checkers(&store)?;
+        let listed = store.snapshot().seq;
+        record_checkers(&store)?;
+        assert_eq!(store.snapshot().seq, listed);
+        let file = dir.path().join("player.bin");
+        std::fs::write(&file, [0u8; 32])?;
+        let added = add_evidence(
+            &store,
+            EvidenceKind::MemorySnapshot,
+            file.to_str().ok_or("path")?,
+        );
+        let evidence = id_in(&added.map_err(|r| r.to_string())?).to_owned();
+        let held = propose(&store, layout("Player", 32, &[])?, &[evidence]);
+        let held = held.map_err(|r| r.to_string())?;
+        assert!(held.contains("held  "), "{held}");
+        // A later build with a fixed layout checker opens the same ledger.
+        let mut newer = store.snapshot().ledger.checkers().clone();
+        *newer.entry("memory_layout".into()).or_default() += 1;
+        store.append(Event::CheckersSet { current: newer })?;
+        let explained = explain(&store, id_in(&held)).map_err(|r| r.to_string())?;
+        assert!(explained.contains("unchecked  "), "{explained}");
+        assert!(
+            explained.contains("held on 1 runs (replayed, not proved) (by an older checker version: does not count)\nno check by a current checker"),
+            "{explained}"
+        );
+        // This build starting again lists its own versions, and its verdict counts again.
+        record_checkers(&store)?;
+        let explained = explain(&store, id_in(&held)).map_err(|r| r.to_string())?;
+        assert!(
+            explained.contains("held  ") && !explained.contains("does not count"),
+            "{explained}"
+        );
         Ok(())
     }
 

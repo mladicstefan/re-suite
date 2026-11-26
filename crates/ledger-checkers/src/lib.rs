@@ -874,6 +874,23 @@ impl Checker<'_> for CallEdgeChecker {
     }
 }
 
+/// Every checker with its version. A checker missing here would have its verdicts
+/// ignored once the log lists the current checkers, so `run` refuses to run one.
+pub const CHECKERS: [(&str, u32); 12] = [
+    (CallEdgeChecker::ID, CallEdgeChecker::VERSION),
+    (ResponseHeaderChecker::ID, ResponseHeaderChecker::VERSION),
+    (StringTableChecker::ID, StringTableChecker::VERSION),
+    (TaggedRecordsChecker::ID, TaggedRecordsChecker::VERSION),
+    (RelationChecker::ID, RelationChecker::VERSION),
+    (RecordArrayChecker::ID, RecordArrayChecker::VERSION),
+    (StatusChecker::ID, StatusChecker::VERSION),
+    (BodySchemaChecker::ID, BodySchemaChecker::VERSION),
+    (HeaderChecker::ID, HeaderChecker::VERSION),
+    (MemoryLayoutChecker::ID, MemoryLayoutChecker::VERSION),
+    (SignatureChecker::ID, SignatureChecker::VERSION),
+    (SchemaChecker::ID, SchemaChecker::VERSION),
+];
+
 /// The checker that `check_claim` runs for a claim, by id and version. With the
 /// claim and the evidence, this is what a recorded verdict is cached on.
 #[must_use]
@@ -1241,6 +1258,12 @@ fn run<'e, C: Checker<'e>>(
     evidence: Result<Vec<Item<C::Evidence>>, CheckError>,
     limit: Duration,
 ) -> Result<Verdict, CheckError> {
+    if !CHECKERS.contains(&(C::ID, C::VERSION)) {
+        return Err(CheckError::InvalidClaim(format!(
+            "checker `{}` is not listed in CHECKERS",
+            C::ID
+        )));
+    }
     let span = tracing::info_span!("check", claim = %id, checker = C::ID, version = C::VERSION);
     let _entered = span.enter();
     let start = Instant::now();

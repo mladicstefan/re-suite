@@ -195,8 +195,10 @@ async fn main() -> anyhow::Result<()> {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "ledger.db".into());
+    let store = Store::open(&path)?;
+    tools::record_checkers(&store)?;
     let server = LedgerServer {
-        store: Arc::new(Store::open(&path)?),
+        store: Arc::new(store),
     };
     tracing::info!(%path, "ledger-mcp serving on stdio");
     server.serve(stdio()).await?.waiting().await?;
