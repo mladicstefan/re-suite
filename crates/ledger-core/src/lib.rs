@@ -1142,9 +1142,19 @@ pub struct Endpoint<'a> {
 /// no scheme, as a server-side capture has, has no host; an empty path is `/`.
 #[must_use]
 pub fn url_host_and_path(url: &str) -> (&str, &str) {
+    // Only a scheme at the very start makes a URL absolute: a path-only capture can
+    // carry another URL in its query.
+    let scheme = |text: &str| {
+        text.starts_with(|c: char| c.is_ascii_alphabetic())
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b))
+    };
     let (host, path) = match url.split_once("://") {
-        Some((_, rest)) => rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len())),
-        None => ("", url),
+        Some((before, rest)) if scheme(before) => {
+            rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()))
+        }
+        _ => ("", url),
     };
     let path = path.split(['?', '#']).next().unwrap_or_default();
     (host, if path.is_empty() { "/" } else { path })
@@ -1762,6 +1772,22 @@ mod tests {
             }),
             premises: BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn a_url_inside_a_query_is_not_the_request_url() -> Result<(), &'static str> {
+        // A server-side capture has no scheme or host; its query can still hold a URL.
+        let callback = "/api/score?redirect=https://app.example/cb";
+        assert_eq!(url_host_and_path(callback), ("", "/api/score"));
+        let score = Endpoint::parse("POST /api/score")?;
+        assert!(score.matches("POST", callback));
+        assert!(!score.matches("POST", "/other?x=://a/api/score"));
+        // A real scheme still gives a host.
+        assert_eq!(
+            url_host_and_path("https://app.example/cb?next=http://x/y"),
+            ("app.example", "/cb")
+        );
+        Ok(())
     }
 
     #[test]
