@@ -5,6 +5,7 @@ mod rizin;
 mod tools;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use ledger_core::{Claim, EvidenceKind};
@@ -195,12 +196,24 @@ async fn main() -> anyhow::Result<()> {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "ledger.db".into());
-    let store = Store::open(&path)?;
+    let store = Arc::new(Store::open(&path)?);
     tools::record_checkers(&store)?;
-    let server = LedgerServer {
-        store: Arc::new(store),
-    };
+    // Checks an older checker made are replayed while the server already answers:
+    // they block, and a large ledger has many.
+    let stop = Arc::new(AtomicBool::new(false));
+    let (rechecked, stopping) = (Arc::clone(&store), Arc::clone(&stop));
+    let rechecking = tokio::task::spawn_blocking(move || {
+        tracing::info!(summary = tools::recheck(&rechecked, &stopping), "rechecked");
+    });
+    let server = LedgerServer { store };
     tracing::info!(%path, "ledger-mcp serving on stdio");
-    server.serve(stdio()).await?.waiting().await?;
-    Ok(())
+    let outcome = async {
+        server.serve(stdio()).await?.waiting().await?;
+        anyhow::Ok(())
+    };
+    let outcome = outcome.await;
+    // However serving ended, the replay stops after the check it is on.
+    stop.store(true, Ordering::Relaxed);
+    rechecking.await?;
+    outcome
 }

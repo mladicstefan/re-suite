@@ -1563,13 +1563,30 @@ impl Entry {
         &'a self,
         current: &'a BTreeMap<String, u32>,
     ) -> impl Iterator<Item = (&'a Verdict, bool)> {
-        let counts = move |checker: &Option<CheckerRef>| {
-            let listed = |c: &CheckerRef| current.get(&c.id) == Some(&c.version);
-            current.is_empty() || checker.as_ref().is_some_and(listed)
-        };
         let checkers = self.checks.iter().map(|(_, checker)| checker);
-        self.verdicts.iter().zip(checkers.map(counts))
+        (self.verdicts.iter()).zip(checkers.map(|by| counts(current, by.as_ref())))
     }
+
+    /// The evidence of each check whose verdict no longer counts and that no checker
+    /// listed now has made again. A check that read nothing cannot be made again.
+    fn stale<'a>(
+        &'a self,
+        current: &'a BTreeMap<String, u32>,
+    ) -> impl Iterator<Item = &'a BTreeSet<EvidenceId>> {
+        let read_by = move |counting: bool| -> BTreeSet<&'a BTreeSet<EvidenceId>> {
+            let checks = self.checks.iter();
+            let wanted = checks.filter(|(_, by)| counts(current, by.as_ref()) == counting);
+            wanted.map(|(read, _)| read).collect()
+        };
+        let made_again = read_by(true);
+        let old = read_by(false).into_iter();
+        old.filter(move |read| !read.is_empty() && !made_again.contains(read))
+    }
+}
+
+/// Whether a verdict by `checker` counts: see [`Entry::counted`].
+fn counts(current: &BTreeMap<String, u32>, checker: Option<&CheckerRef>) -> bool {
+    current.is_empty() || checker.is_some_and(|c| current.get(&c.id) == Some(&c.version))
 }
 
 /// State rebuilt by folding events. Status is never stored, only derived.
@@ -1692,6 +1709,14 @@ impl Ledger {
         };
         let at = entry.checks.iter().rposition(|check| same(&check))?;
         entry.verdicts.get(at)
+    }
+
+    /// Checks to make again after a checker changed: each claim that is not withdrawn,
+    /// with the evidence read by a check whose verdict no longer counts and that no
+    /// checker listed now has repeated. In proposal order.
+    pub fn stale_checks(&self) -> impl Iterator<Item = (&ClaimId, &BTreeSet<EvidenceId>)> {
+        let live = (self.entries.iter()).filter(|e| !e.retracted && e.lapsed.is_none());
+        live.flat_map(|e| e.stale(&self.checkers).map(|read| (&e.id, read)))
     }
 
     /// Why a claim that was admitted under earlier rules is refused by today's. Such a

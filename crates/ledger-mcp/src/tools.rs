@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::io::Read as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -315,6 +316,54 @@ fn stamp(snapshot: &Snapshot, body: &str) -> String {
     format!("seq {}\n{body}", snapshot.seq)
 }
 
+/// Replays a filed claim on `evidence` and records the verdict. Returns true, and
+/// replays nothing, if that verdict is recorded already.
+fn check(
+    store: &Store,
+    id: &ClaimId,
+    kind: &ClaimKind,
+    evidence: &[EvidenceId],
+) -> Result<bool, Rejection> {
+    // A check is the same check if the claim, the evidence it reads and the checker's
+    // version are the same; its recorded verdict then stands and nothing is replayed.
+    // An inconclusive verdict is not reused: it may only have run out of time.
+    let checker = checker_of(kind);
+    let read: BTreeSet<EvidenceId> = evidence.iter().cloned().collect();
+    // Two requests for the same check share one run: the second waits here, then
+    // finds the first one's verdict recorded.
+    let turn = Turn::at(id, &read, &checker);
+    let _mine = turn.gate.lock().unwrap_or_else(PoisonError::into_inner);
+    // The snapshot is let go at the end of this statement: see `propose`.
+    let (reused, kinds): (bool, Vec<_>) = {
+        let ledger = &store.snapshot().ledger;
+        let recorded = ledger.checked(id, &read, &checker);
+        (
+            recorded.is_some_and(|v| !matches!(v, Verdict::Inconclusive { .. })),
+            evidence.iter().map(|e| ledger.evidence_kind(e)).collect(),
+        )
+    };
+    if reused {
+        return Ok(true);
+    }
+    let mut mapped = Vec::with_capacity(evidence.len());
+    for (e, kind) in evidence.iter().zip(kinds) {
+        let unknown = || unknown_evidence(e.as_str());
+        let kind = kind.ok_or_else(unknown)?;
+        mapped.push((e.clone(), kind, store.evidence(e)?.ok_or_else(unknown)?));
+    }
+    let raw: Vec<_> = (mapped.iter())
+        .map(|(e, kind, bytes)| (e.clone(), *kind, &bytes[..]))
+        .collect();
+    let verdict = check_claim(id, kind, &raw, CHECK_LIMIT)?;
+    store.append(Event::Checked {
+        claim: id.clone(),
+        evidence: read,
+        verdict,
+        checker: Some(checker),
+    })?;
+    Ok(false)
+}
+
 /// Files a claim, and replays it against `evidence` if any is given.
 ///
 /// # Errors
@@ -371,45 +420,13 @@ pub fn propose(store: &Store, mut claim: Claim, evidence: &[String]) -> Result<S
     let claim = admit(claim).map_err(StoreError::Core)?;
     let id = claim.get().id().map_err(StoreError::Core)?;
     let kind = claim.get().kind.clone();
-    // What the check needs is taken now and the snapshot let go: while a reader still
-    // holds an old snapshot, every write has to copy the whole ledger.
-    let kinds: Vec<_> = evidence.iter().map(|e| ledger.evidence_kind(e)).collect();
+    // The snapshot is let go before any write: while a reader still holds an old
+    // snapshot, every write has to copy the whole ledger.
     drop(before);
     tracing::info!(claim = %id, "proposing");
     store.append(Event::Proposed { claim })?;
 
-    let mut reused = false;
-    if !evidence.is_empty() {
-        // A check is the same check if the claim, the evidence it reads and the checker's
-        // version are the same; its recorded verdict then stands and nothing is replayed.
-        // An inconclusive verdict is not reused: it may only have run out of time.
-        let checker = checker_of(&kind);
-        let read: BTreeSet<EvidenceId> = evidence.iter().cloned().collect();
-        // Two requests for the same check share one run: the second waits here, then
-        // finds the first one's verdict recorded.
-        let turn = Turn::at(&id, &read, &checker);
-        let _mine = turn.gate.lock().unwrap_or_else(PoisonError::into_inner);
-        reused = (store.snapshot().ledger.checked(&id, &read, &checker))
-            .is_some_and(|v| !matches!(v, Verdict::Inconclusive { .. }));
-        if !reused {
-            let mut mapped = Vec::with_capacity(evidence.len());
-            for (e, kind) in evidence.iter().zip(&kinds) {
-                let unknown = || unknown_evidence(e.as_str());
-                let kind = kind.ok_or_else(unknown)?;
-                mapped.push((e.clone(), kind, store.evidence(e)?.ok_or_else(unknown)?));
-            }
-            let raw: Vec<_> = (mapped.iter())
-                .map(|(e, kind, bytes)| (e.clone(), *kind, &bytes[..]))
-                .collect();
-            let verdict = check_claim(&id, &kind, &raw, CHECK_LIMIT)?;
-            store.append(Event::Checked {
-                claim: id.clone(),
-                evidence: read,
-                verdict,
-                checker: Some(checker),
-            })?;
-        }
-    }
+    let reused = !evidence.is_empty() && check(store, &id, &kind, &evidence)?;
     let after = store.snapshot();
     let mut out = row_of(&after.ledger, &id);
     // The first refutation is why the claim is refuted, whatever was checked after it.
@@ -719,6 +736,47 @@ pub fn record_checkers(store: &Store) -> Result<(), StoreError> {
         store.append(Event::CheckersSet { current })?;
     }
     Ok(())
+}
+
+/// Replays every check whose verdict stopped counting when its checker changed, on
+/// the evidence that check read, and records the new verdicts. Run when the server
+/// starts, after [`record_checkers`]; without it every such claim shows as unchecked
+/// until it is proposed again. `stop` ends it early: what is left is replayed at the
+/// next start.
+pub fn recheck(store: &Store, stop: &AtomicBool) -> String {
+    let stale: Vec<(ClaimId, ClaimKind, Vec<EvidenceId>)> = {
+        let ledger = &store.snapshot().ledger;
+        let checks = ledger.stale_checks().filter_map(|(id, read)| {
+            let kind = ledger.claim(id)?.kind.clone();
+            Some((id.clone(), kind, read.iter().cloned().collect()))
+        });
+        checks.collect()
+    };
+    let (mut replayed, mut failed) = (BTreeSet::new(), 0_usize);
+    let mut checks = 0_usize;
+    for (id, kind, evidence) in &stale {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match check(store, id, kind, evidence) {
+            Ok(_) => {
+                checks += 1;
+                replayed.insert(id);
+            }
+            // One check that today's checker refuses must not keep the rest unchecked.
+            Err(r) => {
+                failed += 1;
+                tracing::warn!(claim = %id, code = r.code, "a check by an older checker could not be replayed");
+            }
+        }
+    }
+    let ledger = &store.snapshot().ledger;
+    let refuted = (replayed.iter())
+        .filter(|id| ledger.status(id) == Some(Status::Refuted))
+        .count();
+    format!(
+        "replayed {checks} checks made by older checkers; {refuted} of their claims are now refuted; {failed} could not be replayed"
+    )
 }
 
 /// Stores what Rizin printed for a program as the facts it holds: its functions and
@@ -1325,6 +1383,72 @@ mod tests {
             explained.contains("held  ") && !explained.contains("does not count"),
             "{explained}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn checks_made_by_an_older_checker_are_replayed_in_bulk() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let file = dir.path().join("player.bin");
+        std::fs::write(&file, [0u8; 32])?;
+        let added = add_evidence(
+            &store,
+            EvidenceKind::MemorySnapshot,
+            file.to_str().ok_or("path")?,
+        );
+        let short_id = id_in(&added.map_err(|r| r.to_string())?).to_owned();
+        let evidence = (store.snapshot().ledger.evidence_starting(&short_id))
+            .next()
+            .cloned()
+            .ok_or("evidence")?;
+        // A ledger an earlier build wrote: its layout checker held all three claims on
+        // the 32-byte snapshot, one of them wrongly. One was withdrawn since.
+        let older = CheckerRef {
+            id: "memory_layout".into(),
+            version: checker_of(&layout("T", 1, &[])?.kind).version - 1,
+        };
+        let mut ids = Vec::new();
+        for (name, size) in [("Player", 32), ("Boss", 64), ("Pet", 32)] {
+            let filed =
+                propose(&store, layout(name, size, &[])?, &[]).map_err(|r| r.to_string())?;
+            let id =
+                find_claim(&store.snapshot().ledger, id_in(&filed)).map_err(|r| r.to_string())?;
+            store.append(Event::Checked {
+                claim: id.clone(),
+                evidence: BTreeSet::from([evidence.clone()]),
+                verdict: Verdict::Held {
+                    runs: std::num::NonZeroU64::MIN,
+                },
+                checker: Some(older.clone()),
+            })?;
+            ids.push(id);
+        }
+        retract(&store, ids[2].as_str(), "not a type".into()).map_err(|r| r.to_string())?;
+        // This build starts on it: the old verdicts stop counting.
+        record_checkers(&store)?;
+        let statuses = || -> Vec<Option<Status>> {
+            let ledger = &store.snapshot().ledger;
+            ids.iter().map(|id| ledger.status(id)).collect()
+        };
+        assert_eq!(
+            statuses(),
+            [Status::Unchecked, Status::Unchecked, Status::Retracted].map(Some)
+        );
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let summary = recheck(&store, &stop);
+        assert_eq!(
+            summary,
+            "replayed 2 checks made by older checkers; 1 of their claims are now refuted; 0 could not be replayed"
+        );
+        assert_eq!(
+            statuses(),
+            [Status::Held, Status::Refuted, Status::Retracted].map(Some)
+        );
+        // Nothing is left to replay, and nothing more is written.
+        let seq = store.snapshot().seq;
+        assert!(recheck(&store, &stop).starts_with("replayed 0 checks"));
+        assert_eq!(store.snapshot().seq, seq);
         Ok(())
     }
 
