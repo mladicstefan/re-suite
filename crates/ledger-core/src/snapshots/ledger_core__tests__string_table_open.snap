@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "table(None, 3, 2).sentence()"
+---
+`TokenTable` holds 3 NUL-terminated strings from +0x14 to the end of the snapshot, each of 2+ characters.

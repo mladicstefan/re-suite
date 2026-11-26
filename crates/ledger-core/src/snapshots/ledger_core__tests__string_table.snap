@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "table(Some(4166), 4095, 0).sentence()"
+---
+`TokenTable` holds 4095 NUL-terminated strings in the 4166 bytes from +0x14.

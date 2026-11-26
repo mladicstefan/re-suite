@@ -39,6 +39,24 @@ verdict  held on 6 captures
 
 "Held on 6" means six captures did not contradict the claim. It is not proof.
 
+## Claim kinds
+
+A claim is one of ten typed statements. Each has an admission rule, a sentence, and a
+checker that replays it on saved evidence.
+
+| Kind | Says | Checked on |
+| :- | :- | :- |
+| `memory_layout` | a type is N bytes, with typed fields at fixed offsets | snapshots |
+| `record_array` | a count is followed by that many fixed-size records | snapshots |
+| `field_relation` | one integer equals a length or a sum taken from the rest | snapshots |
+| `tagged_records` | a run of (size, tag, value) records | snapshots |
+| `string_table` | a region holds a stated number of NUL-terminated strings | snapshots |
+| `request_signature` | requests carry a MAC of stated parts, under a key kept as secret evidence | HTTP exchanges |
+| `request_header` | requests carry a header whose value matches a schema | HTTP exchanges |
+| `request_body_schema` | request bodies match a JSON Schema | HTTP exchanges |
+| `response_schema` | responses with one status match a JSON Schema | HTTP exchanges |
+| `status_set` | an endpoint only answers with the listed statuses | HTTP exchanges |
+
 Toolchain: Rust 1.100.0 (pinned in `rust-toolchain.toml`), edition 2024, resolver 3.
 
 ## Crates

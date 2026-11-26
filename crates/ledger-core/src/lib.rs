@@ -359,9 +359,62 @@ pub struct TaggedRecords {
     pub tags: BTreeSet<u64>,
 }
 
+/// A region holding a stated number of NUL-terminated strings and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StringTable {
+    pub type_name: String,
+    /// Where the first string starts.
+    pub start: u64,
+    /// Bytes in the region. Without it the region goes to the end of the snapshot.
+    #[serde(default)]
+    pub len: Option<u64>,
+    /// How many strings the region holds, each ended by one NUL.
+    pub count: u64,
+    /// The fewest characters a string may have. 0 allows empty strings.
+    #[serde(default)]
+    pub min_chars: u64,
+}
+
+impl StringTable {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        let region = match self.len {
+            Some(len) => format!("in the {len} bytes from +{:#x}", self.start),
+            None => format!("from +{:#x} to the end of the snapshot", self.start),
+        };
+        let each = match self.min_chars {
+            0 => String::new(),
+            min => format!(", each of {min}+ characters"),
+        };
+        format!(
+            "`{}` holds {} NUL-terminated strings {region}{each}.",
+            self.type_name, self.count
+        )
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        if self.type_name.is_empty() || self.count == 0 {
+            return Err(String::from(
+                "a string table needs a type name and at least one string",
+            ));
+        }
+        // Every string takes its characters and one NUL.
+        let least = self.count.saturating_mul(self.min_chars.saturating_add(1));
+        if self.len.is_some_and(|len| len < least) {
+            return Err(format!(
+                "{} strings need at least {least} bytes",
+                self.count
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimKind {
+    StringTable(StringTable),
     TaggedRecords(TaggedRecords),
     FieldRelation(FieldRelation),
     RecordArray(RecordArray),
@@ -395,6 +448,7 @@ impl Claim {
     #[must_use]
     pub const fn subject(&self) -> &str {
         match &self.kind {
+            ClaimKind::StringTable(t) => t.type_name.as_str(),
             ClaimKind::TaggedRecords(t) => t.type_name.as_str(),
             ClaimKind::FieldRelation(r) => r.type_name.as_str(),
             ClaimKind::RecordArray(r) => r.type_name.as_str(),
@@ -411,6 +465,7 @@ impl Claim {
     #[must_use]
     pub fn sentence(&self) -> String {
         match &self.kind {
+            ClaimKind::StringTable(c) => c.sentence(),
             ClaimKind::TaggedRecords(c) => c.sentence(),
             ClaimKind::FieldRelation(c) => c.sentence(),
             ClaimKind::RecordArray(c) => c.sentence(),
@@ -837,6 +892,7 @@ impl ResponseSchema {
 /// `CoreError::Inadmissible` with the reason.
 pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
     let admissible = match &claim.kind {
+        ClaimKind::StringTable(c) => c.admissible(),
         ClaimKind::TaggedRecords(c) => c.admissible(),
         ClaimKind::FieldRelation(c) => c.admissible(),
         ClaimKind::RecordArray(c) => c.admissible(),
@@ -1522,6 +1578,28 @@ mod tests {
         assert!(
             admit(run(None, &[70_000])).is_err(),
             "a tag wider than two bytes"
+        );
+    }
+
+    #[test]
+    fn string_table_sentence_and_admission() {
+        let table = |len, count, min_chars| Claim {
+            kind: ClaimKind::StringTable(StringTable {
+                type_name: "TokenTable".into(),
+                start: 20,
+                len,
+                count,
+                min_chars,
+            }),
+            premises: BTreeSet::new(),
+        };
+        insta::assert_snapshot!("string_table", table(Some(4166), 4095, 0).sentence());
+        insta::assert_snapshot!("string_table_open", table(None, 3, 2).sentence());
+        assert!(admit(table(Some(4166), 4095, 0)).is_ok());
+        assert!(admit(table(None, 0, 0)).is_err());
+        assert!(
+            admit(table(Some(8), 3, 2)).is_err(),
+            "three strings of two characters need nine bytes"
         );
     }
 

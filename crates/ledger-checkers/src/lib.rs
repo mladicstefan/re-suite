@@ -678,11 +678,59 @@ impl<'e> Checker<'e> for TaggedRecordsChecker {
     }
 }
 
+pub struct StringTableChecker;
+
+impl<'e> Checker<'e> for StringTableChecker {
+    const ID: &'static str = "string_table";
+    const VERSION: u32 = 1;
+    type Claim = ledger_core::StringTable;
+    type Evidence = &'e [u8];
+
+    fn check(
+        &self,
+        claim: &Self::Claim,
+        evidence: &[Item<&'e [u8]>],
+        deadline: Instant,
+    ) -> Result<Verdict, CheckError> {
+        Ok(replay(evidence, deadline, |bytes| {
+            let rest = (bytes.len() as u64).saturating_sub(claim.start);
+            let region = slice(bytes, claim.start, claim.len.unwrap_or(rest))
+                .ok_or("the region lies outside the snapshot")?;
+            let Some((&0, strings)) = region.split_last() else {
+                return Err("the region does not end with a NUL".into());
+            };
+            let mut found = 0u64;
+            for (index, text) in strings.split(|b| *b == 0).enumerate() {
+                if !text.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+                    return Err(format!("string {index} is not printable text"));
+                }
+                if (text.len() as u64) < claim.min_chars {
+                    return Err(format!(
+                        "string {index} has {} characters, fewer than {}",
+                        text.len(),
+                        claim.min_chars
+                    ));
+                }
+                found += 1;
+            }
+            if found == claim.count {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the region holds {found} strings, not {}",
+                    claim.count
+                ))
+            }
+        }))
+    }
+}
+
 /// The checker that `check_claim` runs for a claim, by id and version. With the
 /// claim and the evidence, this is what a recorded verdict is cached on.
 #[must_use]
 pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
     let (id, version) = match claim {
+        ClaimKind::StringTable(_) => (StringTableChecker::ID, StringTableChecker::VERSION),
         ClaimKind::TaggedRecords(_) => (TaggedRecordsChecker::ID, TaggedRecordsChecker::VERSION),
         ClaimKind::FieldRelation(_) => (RelationChecker::ID, RelationChecker::VERSION),
         ClaimKind::RecordArray(_) => (RecordArrayChecker::ID, RecordArrayChecker::VERSION),
@@ -784,6 +832,7 @@ pub fn check_claim(
 ) -> Result<Verdict, CheckError> {
     let any_status = |_: Option<u16>| None;
     match claim {
+        ClaimKind::StringTable(c) => run(&StringTableChecker, id, c, snapshots(evidence), limit),
         ClaimKind::TaggedRecords(c) => {
             run(&TaggedRecordsChecker, id, c, snapshots(evidence), limit)
         }
@@ -1548,6 +1597,53 @@ mod tests {
         assert_eq!(
             detail(&claim(None, &[]), &stray),
             "record 3 at +0x1c runs past the end of the snapshot"
+        );
+    }
+
+    /// Trial 1's token table: a fixed number of strings, most of them empty, in a fixed region.
+    #[test]
+    fn string_tables_are_counted_and_read() {
+        let claim = |len, count, min_chars| ledger_core::StringTable {
+            type_name: "TokenTable".into(),
+            start: 4,
+            len,
+            count,
+            min_chars,
+        };
+        let detail = |claim: &ledger_core::StringTable, bytes: &[u8]| match StringTableChecker
+            .check(claim, &[item(b"e", bytes)], soon())
+        {
+            Ok(Verdict::Refuted { counterexample }) => counterexample.detail,
+            Ok(Verdict::Held { .. }) => "held".to_owned(),
+            other => format!("{other:?}"),
+        };
+        // Four header bytes, then "", "mapName", "", "GENT", then two bytes of something else.
+        let file = b"JSAV\0mapName\0\0GENT\0\x07\x08";
+        assert_eq!(detail(&claim(Some(15), 4, 0), file), "held");
+        assert_eq!(
+            detail(&claim(Some(15), 5, 0), file),
+            "the region holds 4 strings, not 5"
+        );
+        assert_eq!(
+            detail(&claim(Some(15), 4, 1), file),
+            "string 0 has 0 characters, fewer than 1"
+        );
+        assert_eq!(
+            detail(&claim(Some(14), 4, 0), file),
+            "the region does not end with a NUL"
+        );
+        assert_eq!(
+            detail(&claim(None, 4, 0), file),
+            "the region does not end with a NUL"
+        );
+        assert_eq!(
+            detail(&claim(Some(99), 4, 0), file),
+            "the region lies outside the snapshot"
+        );
+        let binary = b"JSAV\0map\xffName\0";
+        assert_eq!(
+            detail(&claim(None, 2, 0), binary),
+            "string 1 is not printable text"
         );
     }
 
