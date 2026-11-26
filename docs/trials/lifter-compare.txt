@@ -1,0 +1,59 @@
+
+## UnityCrashHandler64.exe: pe x86-64, 152814 instructions
+same effects: 121780 (79.69%): mov 51685, lea 9799, call 9702, jz 6371, test 5220, jnz 4659, jmp 4438, xor 3735, pop 3405, push 3013
+registers written differ: 26507 (17.35%): cmp 10718, add 8769, sub 4432, inc 1624, dec 488, movsd 187, neg 165, sbb 99, stosb 8, stosw 8
+control flow differs: 5 (0.00%): jmp 4, hlt 1
+only P-code lifts: 3692 (2.42%): movups 1278, xorps 517, movdqa 270, movdqu 260, movaps 229, setz 113, psrldq 91, bt 84, bts 77, setnz 72
+only RzIL lifts: 11 (0.01%): int 8, cmp 1, out 1, in 1
+neither lifts: 819 (0.54%): int3 734, vmovntdq 30, pcmpistri 10, vpand 8, cpuid 6, pshuflw 5, vpcmpeqw 3, outsb 3, vpor 3, xgetbv 2
+both lift 148292 (97.04%); of those, effects differ in 26512 (17.88%)
+  26135: RzIL alone writes af (cmp 10718, add 8769, sub 4432, inc 1624, dec 488)
+  165: P-code alone writes of,pf,sf,zf (neg 165)
+  80: RzIL alone writes rdi,rsi (movsd 80)
+  51: RzIL alone writes rdi,rsi; P-code alone writes zmm0 (movsd 51)
+  30: RzIL alone writes rdi,rsi; P-code alone writes zmm1 (movsd 30)
+  19: P-code alone writes rcx (stosb 8, stosw 8, stosq 2, movsb 1)
+  11: RzIL alone writes rdi,rsi; P-code alone writes zmm6 (movsd 11)
+  5: RzIL alone writes rdi,rsi; P-code alone writes zmm2 (movsd 5)
+functions where both lift every instruction with the same effects: 153 of 2152 (7.1%); setting the AF flag aside: 1115 (51.8%)
+names RzIL sets that P-code has no register for: op1 23919, op2 23919, sub 15150, final 12715, sum 8773, tgt 2077, and_ 2072, tmpvar 28
+
+## ls: elf x86-64, 24578 instructions
+same effects: 19821 (80.65%): mov 7475, lea 1402, call 1323, jz 1251, jmp 1202, test 1193, jnz 852, xor 768, push 545, movzx 492
+registers written differ: 3741 (15.22%): cmp 1827, add 1081, sub 692, sbb 24, fstp 22, neg 20, fld 18, fxch 14, fild 10, fadd 9
+only P-code lifts: 1016 (4.13%): setz 153, movdqa 103, movups 95, movaps 75, setnz 69, setnle 66, setl 65, movdqu 64, pxor 34, pcmpgtd 28
+both lift 23562 (95.87%); of those, effects differ in 3741 (15.88%)
+  3626: RzIL alone writes af (cmp 1827, add 1081, sub 692, sbb 24, adc 1)
+  68: RzIL alone writes fpustatusword; P-code alone writes fpuinstructionpointer (fstp 22, fxch 14, fld 11, fild 10, fistp 6)
+  20: P-code alone writes of,pf,sf,zf (neg 20)
+  16: P-code alone writes fpuinstructionpointer (fadd 9, fmul 4, fsubr 3)
+  7: RzIL alone writes fpustatusword (fld 7)
+  4: P-code alone writes af,c1,fpuinstructionpointer,of,sf (fcomi 4)
+functions where both lift every instruction with the same effects: 105 of 336 (31.2%); setting the AF flag aside: 199 (59.2%)
+names RzIL sets that P-code has no register for: op1 3600, op2 3600, sub 2519, final 1868, sum 1082, tgt 340, and_ 255, f_val_rm 36
+
+## ninja: elf arm-64, 44190 instructions
+same effects: 43383 (98.17%): mov 6920, ldr 5693, add 5136, bl 4144, cmp 3193, str 2279, ldp 2087, b.eq 1894, b 1735, stp 1694
+only P-code lifts: 579 (1.31%): fmov 162, str 138, ldr 102, stp 21, scvtf 21, fdiv 19, ldp 18, movi 14, dup 13, fcmpe 9
+only RzIL lifts: 10 (0.02%): prfm 7, stxr 3
+neither lifts: 218 (0.49%): invalid 93, udf 84, mad 8, ld1b 6, ucvtf 3, mov 2, sqadd 2, smax 2, add 2, msb 2
+both lift 43383 (98.17%); of those, effects differ in 0 (0.00%)
+functions where both lift every instruction with the same effects: 639 of 797 (80.2%); setting the AF flag aside: 639 (80.2%)
+names RzIL sets that P-code has no register for: b 3338, a 3336, r 3307, addr 2088, v 2, i 2
+
+## librz_core.so.0.9.1: elf x86-64, 378886 instructions
+same effects: 336264 (88.75%): mov 134382, lea 40995, call 40635, test 19008, jz 18184, xor 16947, jmp 13310, pop 10853, push 9928, jnz 7788
+registers written differ: 35407 (9.35%): add 15677, cmp 11755, sub 7691, neg 125, movsd 70, sbb 70, adc 9, stosd 5, fld 2, fstp 2
+only P-code lifts: 7087 (1.87%): movaps 1515, movups 1447, movdqa 1045, movdqu 575, setz 538, setnz 348, pxor 302, movq 269, bswap 115, cdqe 98
+neither lifts: 128 (0.03%): ud2 113, psraw 10, psubusb 4, psllw 1
+both lift 371671 (98.10%); of those, effects differ in 35407 (9.53%)
+  35202: RzIL alone writes af (add 15677, cmp 11755, sub 7691, sbb 70, adc 9)
+  125: P-code alone writes of,pf,sf,zf (neg 125)
+  20: RzIL alone writes rdi,rsi (movsd 20)
+  18: RzIL alone writes rdi,rsi; P-code alone writes zmm0 (movsd 18)
+  11: RzIL alone writes rdi,rsi; P-code alone writes zmm1 (movsd 11)
+  5: P-code alone writes rcx (stosd 5)
+  5: RzIL alone writes rdi,rsi; P-code alone writes zmm2 (movsd 5)
+  4: RzIL alone writes fpustatusword; P-code alone writes fpuinstructionpointer (fld 2, fstp 2)
+functions where both lift every instruction with the same effects: 1452 of 4427 (32.8%); setting the AF flag aside: 3538 (79.9%)
+names RzIL sets that P-code has no register for: final 50563, op1 35123, op2 35123, sub 19446, sum 15686, tgt 4711, and_ 574, tmpvar 2

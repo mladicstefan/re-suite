@@ -73,7 +73,10 @@ performance crates added before a profile asks for them.
 
 - Desktop framework and visual design: the UI gate (section 9).
 - Bitwuzla or Z3: the solver spike in Phase 5.
-- Whether Rizin alone can support proofs: the Phase 2 lifter measurement.
+- Whether Rizin alone can support proofs: **not on x86-64.** The Phase 2
+  measurement found three instructions RzIL gives a wrong meaning with
+  nothing to mark them (`neg`, SSE2 `movsd`, `rep stos`). A proof needs
+  the second lifter to agree on every instruction of the function.
 
 ## 4. Shape of the system
 
@@ -381,7 +384,10 @@ the ledger changes no status, and the write and read budgets hold.
 - [x] **Measure RzIL coverage** on our own targets: 96% to 98% of
       instructions, but only 55% to 80% of functions in full, and on
       x86-64 an unlifted instruction looks like one that does nothing
-      (`docs/trials/rzil-coverage.md`). A second lifter was not compared
+      (`docs/trials/rzil-coverage.md`). Against P-code the effects of an
+      instruction differ in 9.5% to 17.9% of x86-64 instructions, 0.06% to
+      0.49% once one flag P-code leaves out is set aside, and never on
+      AArch64; three RzIL meanings are wrong
 
 Done when all five target types have at least one checked claim kind, and
 a new build of a target produces a correct "holds / moved / failed"
@@ -517,7 +523,7 @@ honestly.
 | A snapshot claim must list its evidence ids; a web claim can say `all_captures`. What selects "every snapshot of this type"? | Phase 2, formats |
 | No snapshot claim kind can place a field at an offset that depends on a count, so six agents out of six left out everything after the first variable-length table of a format. Does Kaitai Struct close this? | Phase 2, formats |
 | A rerun ties a web claim to its endpoint and a snapshot claim to its type name, and suggests a move from a bounded search (`docs/trials/version-rerun.md`). That was tried on a simulated pair of builds only. Which anchor survives real version changes with the fewest false matches? | The first real pair of target versions |
-| RzIL lifts 96% to 98% of instructions on both, and 55% to 80% of functions in full (`docs/trials/rzil-coverage.md`). How often does it disagree with a second lifter? None is installed. | End of Phase 2 |
+| RzIL and P-code agree on the effects of every AArch64 instruction both lift, and differ on 0.06% to 0.49% of x86-64 ones once the auxiliary carry flag is set aside (`docs/trials/rzil-coverage.md`). That compares which registers and memory are written, not the values. How often do the values differ? | Phase 5, concrete execution |
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |
 | A web claim covers an endpoint and a status, not a content type, so `GET /{page}` cannot mean "pages, not files". And no claim kind speaks about a page load as a whole (which hosts it contacts) or reads HTML. Which of these should become claims? | Phase 2, formats |
 | With a wider analysis Rizin still leaves 11.5% of one Windows program's code ranges in no function, and now reads some padding and data as functions (`docs/trials/rzil-coverage.md`). Should function starts come from the exception table instead? And should "held on N" need two tools to agree? | Before the second binary claim kind |

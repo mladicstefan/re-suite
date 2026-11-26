@@ -89,6 +89,66 @@ at least one instruction that is not.
   (`fmov`, `scvtf`, `fdiv`, `movi`, `dup`) and some forms of `str`,
   `ldr`, `stp` and `ldp`.
 
+## A second lifter
+
+27 November 2026. `lifter-compare.py` asks RzIL and P-code (Ghidra's
+lifter, through pypcode 4.1.0) about every instruction in the recovered
+functions of the same four programs; `lifter-compare.txt` is its output.
+One run per program; both lifters are deterministic.
+
+The two answers are compared by their effects: which registers the
+instruction writes, whether it writes memory, and whether control leaves
+it. RzIL's `empty` counts as not lifted unless the instruction is on the
+list of ones that do nothing. P-code that only names the instruction (a
+user-defined operation) counts as not lifted too.
+
+| Program | Instructions | Only P-code lifts | Only RzIL lifts | Neither | Both lift | Effects differ, of those both lift | The same, setting one flag aside |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Crash handler | 152,814 | 3,692 (2.42%) | 11 | 819 | 148,292 | 26,512 (17.88%) | 377 (0.25%) |
+| `ls` | 24,578 | 1,016 (4.13%) | 0 | 0 | 23,562 | 3,741 (15.88%) | 115 (0.49%) |
+| `librz_core.so` | 378,886 | 7,087 (1.87%) | 0 | 128 | 371,671 | 35,407 (9.53%) | 205 (0.06%) |
+| `ninja` (AArch64) | 44,190 | 579 (1.31%) | 10 | 218 | 43,383 | 0 | 0 |
+
+**How often do they disagree?** On whether an instruction has a meaning
+at all, in 1.3% to 4.1% of instructions, and almost always the same way:
+P-code lifts what RzIL does not. On what a lifted instruction does, never
+on AArch64 and in 9.5% to 17.9% of instructions on x86-64.
+
+- **One flag is 96.9% to 99.4% of the x86-64 differences.** RzIL sets the
+  auxiliary carry flag in `add`, `sub`, `cmp`, `inc` and `dec`; P-code
+  leaves that flag out of them. The processor does set it, so RzIL is
+  right and P-code is silent. It matters to decimal arithmetic and to
+  code that saves the flags, and to nothing else.
+- **The rest is 0.06% to 0.49%, and there RzIL is wrong three ways.**
+  Each was confirmed on a single instruction:
+  - `neg` sets the carry flag only. The overflow, sign, zero and parity
+    flags, which the processor sets, are left as they were (310
+    instructions in the three programs).
+  - The SSE2 `movsd xmm0, qword [mem]` is lifted as the string
+    instruction of the same name: it writes `rdi` and `rsi` and never
+    `xmm0` (257 instructions).
+  - `rep stosb` stores once and moves `rdi`; the count in `rcx` is
+    neither read nor written (24 instructions with a `rep` prefix).
+- **The x87 instructions differ in bookkeeping:** P-code updates the
+  floating-point instruction pointer and RzIL the status word (99
+  instructions in `ls` and `librz_core.so`).
+- **Whole functions.** The measure a proof needs: both lifters lift
+  every instruction of the function, with the same effects.
+
+  | Program | RzIL alone lifts in full | Both, same effects | Both, setting the flag aside |
+  | --- | --- | --- | --- |
+  | Crash handler | 55.1% | 7.1% | 51.8% |
+  | `ls` | 59.8% | 31.2% | 59.2% |
+  | `librz_core.so` | 80.5% | 32.8% | 79.9% |
+  | `ninja` (AArch64) | 80.2% | 80.2% | 80.2% |
+
+What limits this: effects are compared, not values. Two lifters that
+agree a register is written can still disagree about what is written to
+it; `neg` shows the kind of error that hides there, since only its flags
+gave it away. That needs both meanings run on the same inputs, which is
+Phase 5. One build of each lifter was used, and P-code was given one
+instruction at a time.
+
 ## What follows for the ledger
 
 - **Anything built on RzIL must treat `empty` as "not lifted"** unless
@@ -99,16 +159,19 @@ at least one instruction that is not.
   larger and less clean. Nothing was seen to go wrong with call edges,
   but a claim kind that reads a function's body should check that the
   body decodes.
+- **RzIL cannot be the only lifter under a proof on x86-64.** Three of
+  its meanings are wrong and nothing marks them. A function's RzIL is
+  usable where a second lifter agrees on every instruction; with the
+  auxiliary carry flag set aside that is 52% to 80% of functions, about
+  what RzIL lifts in full by itself.
 - **11.5% of the crash handler is still out of reach**, 267 code ranges
   that no setting recovered. The exception table says where they are;
   giving its entries to the analysis is the obvious next step.
 
 ## Not measured
 
-- **A second lifter.** The roadmap asks how often RzIL disagrees with
-  one. None is installed; `pypcode` would do.
-- **Whether lifted instructions are lifted correctly.** "Lifted" here
-  means RzIL has something to say, not that it is right.
+- **Whether lifted instructions compute the right values.** The second
+  lifter is compared by effects only; see above.
 - **Functions in more than one byte range**, in the call comparison.
   They are 3% to 4% of the functions of the crash handler and `ninja`
   and over half of those of `ls` and `librz_core.so`.
