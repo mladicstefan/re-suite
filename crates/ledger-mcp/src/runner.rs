@@ -1,10 +1,13 @@
 //! The one place that starts outside programs. Each program is an adapter in
 //! [`ADAPTERS`]. What it prints is stored as evidence, and `Event::Derived` logs
 //! which tool, at which version, read which inputs, so a run is never made twice.
-//! The program reads copies of its inputs and never sees this server's environment.
+//! Every program runs confined (`ledger_os::confined`): it reads copies of its
+//! inputs, never sees this server's environment, files or network, and is stopped
+//! when it holds or prints more than its adapter allows.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
@@ -14,13 +17,20 @@ use ledger_checkers::{MAX_PARSED_EVIDENCE, RIZIN_COMMANDS, rizin_facts};
 use ledger_core::{Event, EvidenceId, EvidenceKind, Ledger, ToolRef};
 use ledger_os::TempDir;
 use ledger_store::{Store, StoreError};
-use tokio::process::Command;
+use tokio::io::AsyncReadExt as _;
+use tokio::process::{ChildStdout, Command};
 use tokio::sync::Semaphore;
 
 use crate::tools::{Rejection, kind_name, reject, unknown_evidence};
 
 const MISSING: &str = "No output was recorded. Tell the human: start this server inside the flake's shell (`nix develop`), which sets the path.";
 const FAILED: &str = "No output was recorded. Check that the input is a file the tool can read, then tell the human.";
+const UNCONFINED: &str = "No output was recorded. Tell the human: outside tools run only where the server can confine them, so far Linux.";
+
+/// How often a running program's memory is read.
+const WATCH: Duration = Duration::from_millis(20);
+
+const MIB: u64 = 1 << 20;
 
 /// An outside program, as data: where it is, how to run it, and what of its output to store.
 pub struct Adapter {
@@ -36,6 +46,11 @@ pub struct Adapter {
     args: fn(&[PathBuf]) -> Vec<OsString>,
     /// Longest one run may take. The program is stopped when it runs out.
     limit: Duration,
+    /// Most bytes of memory one run may hold, all its processes added up. The program
+    /// is stopped when it holds more.
+    memory: u64,
+    /// Most bytes one run may print. The program is stopped when it prints more.
+    printed: u64,
     /// The kind its output is stored as.
     pub output: EvidenceKind,
     /// The bytes to store, from what the program printed.
@@ -53,6 +68,9 @@ pub static RIZIN: Adapter = Adapter {
     reads: (1, EvidenceKind::Artifact),
     args: rizin_args,
     limit: Duration::from_secs(600),
+    memory: 4096 * MIB,
+    // What it prints is several times the facts kept from it, which have a limit of their own.
+    printed: 256 * MIB,
     output: EvidenceKind::BinaryFacts,
     parse: rizin_output,
     turn: Semaphore::const_new(1),
@@ -160,10 +178,14 @@ async fn derive_with(
         return Ok(output);
     }
     let (into, read) = (Arc::clone(&store), inputs.clone());
-    let (dir, files) = off_executor(move || materialised(&into, &read)).await?;
-    let mut command = command(&program);
-    command.args((adapter.args)(&files)).current_dir(dir.path());
-    let printed = finished(adapter, &mut command).await;
+    let (dir, command) = off_executor(move || {
+        let (dir, root, files) = materialised(&into, &read)?;
+        let mut command = confined(adapter.id, &program, Some(&root))?;
+        command.args((adapter.args)(&files));
+        Ok((dir, command))
+    })
+    .await?;
+    let printed = finished(adapter, command).await;
     // The directory is removed off the executor too, however the run ended.
     off_executor(move || {
         drop(dir);
@@ -207,7 +229,14 @@ async fn version(adapter: &'static Adapter, program: &Path) -> Result<String, Re
     if let Some(known) = adapter.known.get() {
         return Ok(known.clone());
     }
-    let printed = finished(adapter, command(program).args(adapter.version)).await?;
+    let program = program.to_owned();
+    let command = off_executor(move || {
+        let mut command = confined(adapter.id, &program, None)?;
+        command.args(adapter.version);
+        Ok(command)
+    })
+    .await?;
+    let printed = finished(adapter, command).await?;
     let printed = String::from_utf8_lossy(&printed);
     let line = printed.lines().next().unwrap_or_default().trim();
     let version = line.strip_prefix(adapter.id).unwrap_or(line).trim();
@@ -222,48 +251,119 @@ async fn version(adapter: &'static Adapter, program: &Path) -> Result<String, Re
     Ok(adapter.known.get_or_init(|| version.to_owned()).clone())
 }
 
-/// A program that gets nothing of this server's: no environment, no input. Its
-/// errors are dropped, and so is the program when its run is dropped.
-fn command(program: &Path) -> Command {
-    let mut command = Command::new(program);
+/// The confined program in `work`, which gets nothing of this server's: no
+/// environment, no input. Its errors are dropped. Every run starts here.
+fn confined(
+    id: &'static str,
+    program: &Path,
+    work: Option<&Path>,
+) -> Result<std::process::Command, Rejection> {
+    let mut command = ledger_os::confined(program, work).map_err(|e| unstartable(id, &e))?;
     command
         .env_clear()
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    Ok(command)
 }
 
-/// What the program printed, if it ended well within its limit.
-async fn finished(adapter: &Adapter, command: &mut Command) -> Result<Vec<u8>, Rejection> {
-    let ran = tokio::time::timeout(adapter.limit, command.output()).await;
-    let ran = ran.map_err(|_| {
-        reject(
+fn unstartable(id: &'static str, e: &io::Error) -> Rejection {
+    if e.kind() == io::ErrorKind::Unsupported {
+        let message = format!("No tool is started here: {e}.");
+        return reject("tool_unconfined", id, message, UNCONFINED);
+    }
+    reject(
+        "tool_missing",
+        id,
+        format!("It could not be started: {e}."),
+        MISSING,
+    )
+}
+
+/// What the program printed, if it ended well within its limits. It is started here,
+/// on the executor's thread, which lives as long as the server: a confined program
+/// dies with the thread that started it. It also dies, with every process under it,
+/// when its run is dropped.
+async fn finished(adapter: &Adapter, command: std::process::Command) -> Result<Vec<u8>, Rejection> {
+    let mut command = Command::from(command);
+    let started = command.kill_on_drop(true).spawn();
+    let mut child = started.map_err(|e| unstartable(adapter.id, &e))?;
+    let failed = |e: io::Error| reject("tool_failed", adapter.id, format!("{e}."), FAILED);
+    let (Some(pid), Some(stdout)) = (child.id(), child.stdout.take()) else {
+        return Err(failed(io::ErrorKind::BrokenPipe.into()));
+    };
+    let ran = async {
+        let printed = within(stdout, adapter.printed).await.map_err(failed)?;
+        let printed = printed.ok_or_else(|| {
+            let message = format!(
+                "It printed more than {} MiB and was stopped.",
+                adapter.printed / MIB
+            );
+            let next = "No output was recorded. Tell the human: this input makes the tool print more than the server keeps.";
+            reject("tool_over_output", adapter.id, message, next)
+        })?;
+        let status = child.wait().await.map_err(failed)?;
+        if !status.success() {
+            let message = format!("It ended with {status}.");
+            return Err(reject("tool_failed", adapter.id, message, FAILED));
+        }
+        Ok(printed)
+    };
+    tokio::select! {
+        biased;
+        ran = ran => ran,
+        over = over_memory(adapter, pid) => Err(over),
+        () = tokio::time::sleep(adapter.limit) => Err(reject(
             "tool_timeout",
             adapter.id,
-            format!(
-                "It did not finish within {:?} and was stopped.",
-                adapter.limit
-            ),
+            format!("It did not finish within {:?} and was stopped.", adapter.limit),
             "No output was recorded. Tell the human: this input needs a longer limit or a lighter run.",
-        )
-    })?;
-    let ran = ran.map_err(|e| {
-        let message = format!("It could not be started: {e}.");
-        reject("tool_missing", adapter.id, message, MISSING)
-    })?;
-    if !ran.status.success() {
-        let message = format!("It ended with {}.", ran.status);
-        return Err(reject("tool_failed", adapter.id, message, FAILED));
+        )),
     }
-    Ok(ran.stdout)
 }
 
-/// Each input as a file named by its id, in a new directory only this user can open.
+/// Everything `stdout` gives until it ends, or `None` once it gives more than
+/// `limit` bytes. No more than `limit` bytes are ever held.
+async fn within(stdout: ChildStdout, limit: u64) -> io::Result<Option<Vec<u8>>> {
+    let mut kept = Vec::new();
+    let mut stdout = stdout.take(limit);
+    stdout.read_to_end(&mut kept).await?;
+    let more = stdout.into_inner().read(&mut [0]).await?;
+    Ok((more == 0).then_some(kept))
+}
+
+/// Returns once the processes of the run `pid` started hold more memory than its
+/// adapter allows, or their memory cannot be read; never while they stay within.
+async fn over_memory(adapter: &Adapter, pid: u32) -> Rejection {
+    loop {
+        tokio::time::sleep(WATCH).await;
+        // `pid` is not waited for until the run ends, so no other process can take its number.
+        match off_executor(move || Ok(ledger_os::resident(pid))).await {
+            Ok(Ok(held)) if held <= adapter.memory => {}
+            Ok(Ok(_)) => {
+                let message = format!(
+                    "It held more than {} MiB of memory and was stopped.",
+                    adapter.memory / MIB
+                );
+                let next = "No output was recorded. Tell the human: this input needs a higher memory limit or a lighter run.";
+                return reject("tool_over_memory", adapter.id, message, next);
+            }
+            // A run whose memory cannot be watched is not confined.
+            Ok(Err(e)) => {
+                let message = format!("Its memory could not be read, so it was stopped: {e}.");
+                return reject("tool_unconfined", adapter.id, message, UNCONFINED);
+            }
+            Err(rejection) => return rejection,
+        }
+    }
+}
+
+/// Each input as a file named by its id, in a new directory only this user can open,
+/// with the directory's absolute path.
 fn materialised(
     store: &Store,
     inputs: &BTreeSet<EvidenceId>,
-) -> Result<(TempDir, Vec<PathBuf>), Rejection> {
+) -> Result<(TempDir, PathBuf, Vec<PathBuf>), Rejection> {
     let unwritable = |e: std::io::Error| {
         let message = format!("They could not be written for the tool: {e}.");
         reject("tool_failed", "inputs", message, FAILED)
@@ -280,7 +380,7 @@ fn materialised(
         std::fs::write(&file, &*bytes).map_err(unwritable)?;
         files.push(file);
     }
-    Ok((dir, files))
+    Ok((dir, root, files))
 }
 
 /// Stores what `tool` printed for `inputs` and logs the run that made it.
@@ -320,8 +420,11 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    /// A shell is the one program every test machine has at a fixed path.
-    const SH: &str = "/bin/sh";
+    /// A shell from the store, which the flake's shell names: a confined program sees
+    /// nothing outside the store.
+    fn sh() -> Option<OsString> {
+        std::env::var_os("LEDGER_TEST_SH")
+    }
 
     fn script(script: &str, files: &[PathBuf]) -> Vec<OsString> {
         let args = ["-c", script, "fake"].into_iter().map(OsString::from);
@@ -342,6 +445,18 @@ mod tests {
         script("exit 3", files)
     }
 
+    /// Doubles a string until it is stopped.
+    fn grow(files: &[PathBuf]) -> Vec<OsString> {
+        script("x=y; while :; do x=$x$x; done", files)
+    }
+
+    /// Prints lines of a kibibyte until it is stopped.
+    fn flood(files: &[PathBuf]) -> Vec<OsString> {
+        let lines =
+            r#"y=y; for i in 1 2 3 4 5 6 7 8 9 10; do y=$y$y; done; while :; do echo "$y"; done"#;
+        script(lines, files)
+    }
+
     #[expect(
         clippy::unnecessary_wraps,
         reason = "an adapter's parser has to be able to refuse"
@@ -359,6 +474,8 @@ mod tests {
             reads: (1, EvidenceKind::Artifact),
             args,
             limit,
+            memory: 1024 * MIB,
+            printed: MIB,
             output: EvidenceKind::Artifact,
             parse: as_printed,
             turn: Semaphore::const_new(1),
@@ -379,7 +496,7 @@ mod tests {
         static ONCE: Adapter = fake(first_line, SECONDS);
         let dir = tempfile::tempdir()?;
         let (store, inputs) = ledger(dir.path())?;
-        let first = derive_with(Arc::clone(&store), &ONCE, Some(SH.into()), inputs.clone()).await;
+        let first = derive_with(Arc::clone(&store), &ONCE, sh(), inputs.clone()).await;
         let first = first.map_err(|r| r.to_string())?;
         assert_eq!(&store.evidence(&first)?.ok_or("not stored")?[..], b"first");
         let tool = ToolRef {
@@ -403,11 +520,11 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let (store, inputs) = ledger(dir.path())?;
         let running = TURNS.turn.acquire().await?;
-        let waiting = derive_with(Arc::clone(&store), &TURNS, Some(SH.into()), inputs.clone());
+        let waiting = derive_with(Arc::clone(&store), &TURNS, sh(), inputs.clone());
         let waited = tokio::time::timeout(Duration::from_millis(500), waiting).await;
         assert!(waited.is_err(), "it did not wait: {waited:?}");
         drop(running);
-        let ran = derive_with(store, &TURNS, Some(SH.into()), inputs).await;
+        let ran = derive_with(store, &TURNS, sh(), inputs).await;
         assert!(ran.is_ok(), "{ran:?}");
         Ok(())
     }
@@ -418,6 +535,8 @@ mod tests {
         static NOT_STARTED: Adapter = fake(first_line, SECONDS);
         static SPINS: Adapter = fake(spin, Duration::from_millis(200));
         static FAILS: Adapter = fake(fail, SECONDS);
+        static GROWS: Adapter = grows();
+        static FLOODS: Adapter = fake(flood, SECONDS);
         let dir = tempfile::tempdir()?;
         let (store, inputs) = ledger(dir.path())?;
         let snapshot = store.add_evidence(EvidenceKind::MemorySnapshot, b"memory")?;
@@ -435,13 +554,64 @@ mod tests {
                 inputs.clone(),
             )
             .await,
-            refused(&FOUND, Some(SH.into()), BTreeSet::new()).await,
-            refused(&FOUND, Some(SH.into()), [snapshot].into()).await,
-            refused(&SPINS, Some(SH.into()), inputs.clone()).await,
-            refused(&FAILS, Some(SH.into()), inputs).await,
+            refused(&FOUND, sh(), BTreeSet::new()).await,
+            refused(&FOUND, sh(), [snapshot].into()).await,
+            refused(&SPINS, sh(), inputs.clone()).await,
+            refused(&FAILS, sh(), inputs.clone()).await,
+            refused(&GROWS, sh(), inputs.clone()).await,
+            refused(&FLOODS, sh(), inputs).await,
         ];
         assert_eq!(store.snapshot().seq, seq, "a refused run was recorded");
         insta::assert_snapshot!("refused_runs", all.join("\n"));
+        Ok(())
+    }
+
+    /// A tool that keeps allocating, with a memory limit far below what would trouble
+    /// the machine. Its time limit is short too, in case the memory limit fails.
+    const fn grows() -> Adapter {
+        let mut grows = fake(grow, Duration::from_secs(3));
+        grows.memory = 64 * MIB;
+        grows
+    }
+
+    #[tokio::test]
+    async fn a_tool_that_keeps_allocating_is_stopped_at_its_memory_limit() -> TestResult {
+        static GROWS: Adapter = grows();
+        let dir = tempfile::tempdir()?;
+        let (store, inputs) = ledger(dir.path())?;
+        let started = std::time::Instant::now();
+        let ran = derive_with(store, &GROWS, sh(), inputs).await;
+        assert_eq!(ran.map_err(|r| r.code).err(), Some("tool_over_memory"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_tool_that_prints_without_end_is_stopped_and_the_server_keeps_little() -> TestResult {
+        static FLOODS: Adapter = fake(flood, SECONDS);
+        let dir = tempfile::tempdir()?;
+        let (store, inputs) = ledger(dir.path())?;
+        let me = std::process::id();
+        let before = ledger_os::resident(me)?;
+        let run = derive_with(store, &FLOODS, sh(), inputs);
+        tokio::pin!(run);
+        // This process's memory, the tool's included, read while the tool prints.
+        let mut most = before;
+        let ran = loop {
+            tokio::select! {
+                ran = &mut run => break ran,
+                () = tokio::time::sleep(Duration::from_millis(5)) => {
+                    most = most.max(ledger_os::resident(me)?);
+                }
+            }
+        };
+        let grew = most.saturating_sub(before);
+        assert!(grew < 32 * MIB, "the server grew by {} MiB", grew / MIB);
+        assert_eq!(ran.map_err(|r| r.code).err(), Some("tool_over_output"));
         Ok(())
     }
 

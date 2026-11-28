@@ -58,7 +58,7 @@ section 9).
 | Heavy checks | Separate worker processes | May be Python where the libraries live |
 | File and protocol formats | Kaitai Struct, through the parser its own compiler generates, run in a worker process | Decided 28 November 2026. Until the worker is built, a subset of the language is read by our own checker (`ledger_checkers::format`), which the worker replaces |
 | Binary analysis | Rizin | Phase 2 onwards; paused |
-| Outside tools | Run in one place as sandboxed processes; their output is stored as evidence | Checkers stay in-process and pure. Phase 2W |
+| Outside tools | Run in one place, each confined by bubblewrap (Linux only so far), with time, memory and output limits; their output is stored as evidence | Checkers stay in-process and pure. Phase 2W |
 | Web capture | Chromium over the DevTools Protocol; mitmproxy for other clients | Only for a person at a terminal who approves the hosts |
 | Minified JavaScript | Source maps, Wakaru, webcrack | Phase 2W |
 | Technology fingerprints | Wappalyzer rules on saved captures; retire.js on script contents | Phase 2W |
@@ -301,6 +301,18 @@ checks and 10 s for solver checks, both configurable per claim kind.
   parser has size limits.
 - Checks have no network access. Worker processes run with time and
   memory limits.
+- An outside tool runs confined (`ledger_os::confined`, bubblewrap on
+  Linux; no tool starts on a system without it). It sees the Nix store
+  read-only, its own directory with copies of its inputs, an empty
+  `/tmp` of 64 MiB, its own `/proc` and a read-only `/dev`: no network,
+  no home directory, no ledger or evidence files, no other process, and
+  it dies with the server. Its adapter names a memory limit, held by a
+  watchdog on the resident memory of its processes, and an output
+  limit; past either it is stopped, with a rejection code of its own.
+  Not confined yet: the size of what it writes in its own directory,
+  kernel memory outside its processes (pipes, `memfd`), and system calls
+  (no seccomp filter). The browser of `ledger-capture web` is started by
+  a person, outside the runner, and is not confined.
 - Nothing executes code from a target in Phases 1 to 3. Emulation arrives
   later, behind approval.
 - Secrets supplied by the user, such as signing keys, are stored as
@@ -436,7 +448,9 @@ Two pieces every playbook stands on:
       tool. What a tool prints is stored as evidence, and the log records
       which tool, at which version, read which inputs (`Event::Derived`);
       the same run is not made twice. Checkers stay in-process and pure.
-      Rizin runs through it. No memory limit or system sandbox yet
+      Rizin runs through it, confined by bubblewrap with no network and
+      no host files but the Nix store, and stopped past its memory or
+      output limit
 - [x] **Every tool is pinned.** Nix for programs, a lockfile for npm
       packages: Wakaru, webcrack, retire.js, ast-grep, mitmproxy, wabt,
       wasm-tools, prettier, and a Wappalyzer rule engine that runs on

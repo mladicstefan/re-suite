@@ -52,10 +52,22 @@
           };
           jsTools = pkgs.runCommand "re-suite-js-tools" { } ''
             mkdir -p $out/bin
-            for tool in wakaru webcrack retire; do
+            for tool in webcrack retire; do
               ln -s ${jsModules}/node_modules/.bin/$tool $out/bin/$tool
             done
           '';
+          # Wakaru's npm package runs a prebuilt program that asks for the host's loader, and a
+          # confined tool sees only the store; this copy loads the store's glibc instead.
+          wakaru = pkgs.stdenv.mkDerivation {
+            name = "wakaru";
+            dontUnpack = true;
+            nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+            installPhase =
+              let
+                arch = { x86_64-linux = "x64"; aarch64-linux = "arm64"; }.${system};
+              in
+              "install -Dm755 ${jsModules}/node_modules/@wakaru/cli-linux-${arch}/wakaru $out/bin/wakaru";
+          };
           # The Wappalyzer rule set (wappalyzergo, pinned by go.sum) on saved responses.
           fingerprint = pkgs.buildGoModule {
             pname = "ledger-fingerprint";
@@ -83,6 +95,7 @@
             pkgs.chromium
             # What the web playbooks run on captured traffic and scripts.
             jsTools
+            wakaru
             fingerprint
             pkgs.ast-grep
             pkgs.mitmproxy
@@ -92,11 +105,19 @@
           ];
           # ledger-mcp starts an outside program only by the absolute path in its
           # LEDGER_TOOL_<ID> variable, one per adapter in crates/ledger-mcp/src/runner.rs,
-          # and never looks on PATH; nor does `ledger-capture web` for the browser. The
-          # next adapter's variable goes here, for example
-          # LEDGER_TOOL_WAKARU = "${jsTools}/bin/wakaru";
+          # and never looks on PATH; nor does `ledger-capture web` for the browser.
+          # Every tool runs inside bubblewrap, which sees the store and nothing of the host.
+          LEDGER_TOOL_BWRAP = "${pkgs.bubblewrap}/bin/bwrap";
           LEDGER_TOOL_RIZIN = "${pkgs.rizin}/bin/rizin";
           LEDGER_TOOL_CHROMIUM = "${pkgs.chromium}/bin/chromium";
+          # No adapter yet; ledger-os's tests start each one confined and ask its version.
+          LEDGER_TOOL_WAKARU = "${wakaru}/bin/wakaru";
+          LEDGER_TOOL_WEBCRACK = "${jsTools}/bin/webcrack";
+          LEDGER_TOOL_RETIRE = "${jsTools}/bin/retire";
+          LEDGER_TOOL_AST_GREP = "${pkgs.ast-grep}/bin/ast-grep";
+          LEDGER_TOOL_FINGERPRINT = "${fingerprint}/bin/ledger-fingerprint";
+          # The tests' stand-in for a tool: a shell from the store, the only place a confined tool sees.
+          LEDGER_TEST_SH = "${pkgs.bash}/bin/sh";
         };
     in
     {

@@ -79,6 +79,22 @@ Every new `ClaimKind` variant needs all four, in the same change:
 - It runs with an empty environment and no stdin, on copies of its inputs in a
   private temporary directory that is its working directory, with a time limit,
   one run at a time per tool.
+- Every run is confined by `ledger_os::confined`, and the runner has no other way
+  to start a program. On Linux that is bubblewrap, found by `LEDGER_TOOL_BWRAP`:
+  the tool sees the Nix store read-only, its directory, an empty `/tmp` of 64 MiB,
+  its own `/proc` and a read-only `/dev`. No network, no home directory, no ledger
+  or evidence files, no other process, and it dies with the server. A program
+  outside the store cannot be started, so a tool that loads anything from the host
+  (a prebuilt binary that asks for `/lib64/ld-linux-x86-64.so.2`) is patched in the
+  flake. Where no confinement is written, no tool starts (`tool_unconfined`).
+- Each adapter names a memory limit and an output limit. The runner reads the
+  resident memory of the tool's processes every 20 ms (`ledger_os::resident`) and
+  stops it above the limit (`tool_over_memory`); it keeps at most the output limit
+  of what the tool prints and stops it past that (`tool_over_output`).
+- Not confined: the size of files a tool writes in its own directory, memory the
+  kernel holds for it outside its processes (pipes, `memfd`), which system calls
+  it makes (no seccomp filter), and the CPU it uses until its time limit. `ledger-capture web` and its browser are
+  started by a person, not by the runner, and are not confined.
 - What it prints is stored as evidence and logged as `Event::Derived`: the tool,
   the version it reported, the inputs and the output, all evidence the ledger
   holds. The same tool, version and inputs never run twice. A file stored as it

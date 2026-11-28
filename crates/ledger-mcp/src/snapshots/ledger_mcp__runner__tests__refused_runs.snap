@@ -9,3 +9,5 @@ tool_inputs_wrong [fake]: It reads 1 input of kind artifact. Next: No output was
 tool_inputs_wrong [fake]: It reads 1 input of kind artifact. Next: No output was recorded. Add the input with add_evidence first, then name its id in `inputs`.
 tool_timeout [fake]: It did not finish within 200ms and was stopped. Next: No output was recorded. Tell the human: this input needs a longer limit or a lighter run.
 tool_failed [fake]: It ended with exit status: 3. Next: No output was recorded. Check that the input is a file the tool can read, then tell the human.
+tool_over_memory [fake]: It held more than 64 MiB of memory and was stopped. Next: No output was recorded. Tell the human: this input needs a higher memory limit or a lighter run.
+tool_over_output [fake]: It printed more than 1 MiB and was stopped. Next: No output was recorded. Tell the human: this input makes the tool print more than the server keeps.

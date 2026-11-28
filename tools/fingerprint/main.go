@@ -2,6 +2,7 @@
 //
 // Reads one JSON object per line on stdin: {"id": ..., "headers": {name: [values]}, "body": text}.
 // Writes one per line on stdout: {"id": ..., "technologies": {name: {"version": ..., "categories": [...]}}}.
+// With --version it prints the version of the rule set, which decides what it finds.
 package main
 
 import (
@@ -9,10 +10,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	wappalyzer "github.com/projectdiscovery/wappalyzergo"
 )
+
+const ruleSet = "github.com/projectdiscovery/wappalyzergo"
+
+func version() {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, dep := range info.Deps {
+			if dep.Path == ruleSet {
+				fmt.Println("ledger-fingerprint", "wappalyzergo", dep.Version)
+				return
+			}
+		}
+	}
+	fmt.Fprintln(os.Stderr, "the build does not say which rule set it holds")
+	os.Exit(1)
+}
 
 type response struct {
 	ID      string              `json:"id"`
@@ -31,6 +48,10 @@ type detected struct {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		version()
+		return
+	}
 	rules, err := wappalyzer.New()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "loading the rules:", err)

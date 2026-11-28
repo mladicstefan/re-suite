@@ -10,22 +10,24 @@ target; all checks replay captures.
 
 ## Crate map
 - `crates/ledger-core`: pure sync model (claims, `admit`, events, verdicts, derived status, which tool run made which evidence). No IO.
-- `crates/ledger-os`: everything that differs by operating system, picked at compile time. No other crate uses `#[cfg]` on the system or `std::os`.
+- `crates/ledger-os`: everything that differs by operating system, picked at compile time, including the confinement every outside tool runs in (bubblewrap on Linux; elsewhere no tool starts). No other crate uses `#[cfg]` on the system or `std::os`.
 - `crates/ledger-store`: SQLite WAL, single writer thread with group commit, published snapshots, append-only events, evidence files by hash.
 - `crates/ledger-checkers`: offline checkers behind the `Checker` trait.
 - `crates/ledger-mcp`: stdio MCP server (propose, ask, explain, add_evidence, retract). Only crate with tokio.
-  Its `runner` module is the one place that starts outside programs, each found by the absolute path in `LEDGER_TOOL_<ID>`.
+  Its `runner` module is the one place that starts outside programs, each found by the absolute path in `LEDGER_TOOL_<ID>`,
+  confined by `ledger_os::confined`, and stopped past its adapter's time, memory or output limit.
 - `crates/ledger-cli`: prints claims with status from a ledger file. `ledger-capture` takes what only a person may capture: `memory` of a running process, a `web` session in Chromium. Its second binary, `ledger-capture`, is how a person takes a live capture.
 - `playbooks/`: what an agent does in each situation, one file each. `ask about=playbooks` serves the ones that apply, from the table in `crates/ledger-mcp/src/playbooks.rs`.
 - `crates/ledger-bench`: `cargo run --release -p ledger-bench` checks the ROADMAP.md budgets.
 
 ## Checks
-- Tools: `flake.nix` pins every outside tool (Rust, cargo tools, Rizin, Kaitai compiler, gdb, uv, llvm, Node, Chromium).
+- Tools: `flake.nix` pins every outside tool (Rust, cargo tools, bubblewrap, Rizin, Kaitai compiler, gdb, uv, llvm, Node, Chromium).
   Run anything that needs one with `nix develop -c <command>`. Never install a tool on the machine; add it to the flake.
   npm tools are pinned in `tools/js`: add one with `npm install --package-lock-only --save-exact --ignore-scripts <name>` there.
   `tools/fingerprint` is a Go wrapper; after changing its dependencies, refresh `vendorHash` in the flake.
 - Full CI: `scripts/ci.sh` (fmt, clippy -D warnings, clippy of ledger-os for Windows and macOS, nextest, doctests, cargo deny, cargo machete, uv lock check).
-  It enters the flake's shell itself.
+  It enters the flake's shell itself. Tests that start a confined tool need the flake's variables
+  (`LEDGER_TOOL_*`, `LEDGER_TEST_SH`), so run cargo inside `nix develop` too.
 - Hooks in `.claude/settings.json` run `cargo check -p <crate>` after `.rs` edits and
   `scripts/ci.sh` before `git commit`; they also guard protected config, hand-written
   versions and uncommented `#[allow]`.

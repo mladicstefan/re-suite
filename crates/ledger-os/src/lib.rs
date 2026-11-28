@@ -286,6 +286,147 @@ pub fn read_memory(pid: u32, address: u64, len: usize) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// The variable that holds bubblewrap's absolute path. The flake's shell sets it.
+#[cfg(target_os = "linux")]
+const BWRAP: &str = "LEDGER_TOOL_BWRAP";
+
+/// Where Nix keeps programs and the libraries they load: all of the host a confined
+/// program sees.
+#[cfg(target_os = "linux")]
+const STORE: &str = "/nix/store";
+
+/// Most bytes a confined program may keep in its `/tmp`, which is held in memory.
+#[cfg(target_os = "linux")]
+const SCRATCH: u64 = 64 << 20;
+
+/// A command that starts `program` confined; the caller adds its arguments. It sees
+/// the Nix store read-only, `work` as its working directory and the one place it can
+/// write that outlives it, an empty `/tmp` of at most 64 MiB, its own
+/// `/proc` and a minimal read-only `/dev` (`null`, `zero`, `urandom` and the like).
+/// Nothing else of the host: no network, no home directory, no other file, no
+/// environment, no other process. Started without `work`, it runs in `/tmp`.
+///
+/// It is killed when the thread that started it ends, so start it from one that
+/// lives as long as the server, and not from a pool that stops idle threads.
+///
+/// # Errors
+/// `program` is not there or not in the store, or bubblewrap's variable does not
+/// hold an absolute path. On a system with no confinement written, always
+/// ([`io::ErrorKind::Unsupported`]).
+#[cfg(target_os = "linux")]
+pub fn confined(program: &Path, work: Option<&Path>) -> io::Result<std::process::Command> {
+    // A missing program reads as missing, not as a run that failed inside.
+    fs::metadata(program)?;
+    if !program.starts_with(STORE) {
+        let why = format!("{} is not in {STORE}", program.display());
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, why));
+    }
+    let bwrap = std::env::var_os(BWRAP).map(PathBuf::from);
+    let bwrap = bwrap.filter(|path| path.is_absolute()).ok_or_else(|| {
+        let why = format!("`{BWRAP}` does not hold bubblewrap's absolute path");
+        io::Error::new(io::ErrorKind::NotFound, why)
+    })?;
+    let scratch = SCRATCH.to_string();
+    let mut command = std::process::Command::new(bwrap);
+    command.args([
+        // Every namespace of its own, the network's and the processes' among them.
+        "--unshare-all",
+        "--unshare-user",
+        "--disable-userns",
+        "--die-with-parent",
+        // A terminal it inherited cannot be made to type into the server's.
+        "--new-session",
+        "--clearenv",
+        "--ro-bind",
+        STORE,
+        STORE,
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--remount-ro",
+        "/dev",
+        "--size",
+        &scratch,
+        "--tmpfs",
+        "/tmp",
+    ]);
+    match work {
+        Some(dir) => command
+            .arg("--bind")
+            .args([dir, dir])
+            .arg("--chdir")
+            .arg(dir),
+        None => command.args(["--chdir", "/tmp"]),
+    };
+    // The root holds only the mount points; nothing can be written next to them.
+    command.args(["--remount-ro", "/", "--"]).arg(program);
+    Ok(command)
+}
+
+/// Bytes of memory that the process `pid` and every process under it hold in RAM,
+/// added up, so a page two of them share counts twice.
+///
+/// # Errors
+/// There is no process `pid`, or the system does not say what it holds.
+#[cfg(target_os = "linux")]
+pub fn resident(pid: u32) -> io::Result<u64> {
+    let mut under = Vec::new();
+    let mut held = resident_one(pid, &mut under)?;
+    while let Some(child) = under.pop() {
+        // A process under it can end while it is read, and then it holds nothing.
+        held += resident_one(child, &mut under).unwrap_or(0);
+    }
+    Ok(held)
+}
+
+/// What `pid` alone holds in RAM. Its children are added to `under`.
+#[cfg(target_os = "linux")]
+fn resident_one(pid: u32, under: &mut Vec<u32>) -> io::Result<u64> {
+    let proc = PathBuf::from(format!("/proc/{pid}"));
+    // Each thread lists the children it started.
+    for task in fs::read_dir(proc.join("task"))? {
+        let task = task?.path();
+        match fs::read_to_string(task.join("children")) {
+            Ok(children) => {
+                let children = children.split_whitespace().map(str::parse::<u32>);
+                under.extend(children.filter_map(Result::ok));
+            }
+            // A thread can end while it is read; the first one lasts as long as the process.
+            Err(_) if !task.ends_with(pid.to_string()) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let status = fs::read_to_string(proc.join("status"))?;
+    // A process that has ended and is not yet waited for has no such line.
+    let Some(kib) = status.lines().find_map(|line| line.strip_prefix("VmRSS:")) else {
+        return Ok(0);
+    };
+    let kib = kib.trim().trim_end_matches("kB").trim_end().parse::<u64>();
+    kib.map(|kib| kib * 1024).map_err(io::Error::other)
+}
+
+#[cfg(not(target_os = "linux"))]
+const NO_CONFINEMENT: &str = "confining an outside tool is only written for Linux";
+
+/// A command that starts `program` confined.
+///
+/// # Errors
+/// Always, on this system ([`io::ErrorKind::Unsupported`]): no confinement is written for it yet.
+#[cfg(not(target_os = "linux"))]
+pub fn confined(_program: &Path, _work: Option<&Path>) -> io::Result<std::process::Command> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, NO_CONFINEMENT))
+}
+
+/// Bytes of memory that the process `pid` and every process under it hold in RAM.
+///
+/// # Errors
+/// Always, on this system: see [`confined`].
+#[cfg(not(target_os = "linux"))]
+pub fn resident(_pid: u32) -> io::Result<u64> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, NO_CONFINEMENT))
+}
+
 #[cfg(not(target_os = "linux"))]
 const LINUX_ONLY: &str = "reading a running process is only written for Linux";
 
@@ -324,10 +465,110 @@ mod tests {
         let me = std::process::id();
         assert_eq!(read_memory(me, address, known.len())?, known);
         assert_ne!(process_name(me)?, "");
+        assert!(resident(me)? > 0);
         // Nothing is mapped at address 0, and process 0 is not a process.
         assert!(read_memory(me, 0, 16).is_err());
         assert!(read_memory(0, address, 16).is_err());
         assert!(process_name(0).is_err());
+        assert!(resident(0).is_err());
+        Ok(())
+    }
+
+    /// A program the flake's shell names, by its variable.
+    #[cfg(target_os = "linux")]
+    fn from_flake(var: &str) -> io::Result<PathBuf> {
+        std::env::var_os(var).map(PathBuf::from).ok_or_else(|| {
+            let why = format!("`{var}` is not set: run the tests inside `nix develop`");
+            io::Error::new(io::ErrorKind::NotFound, why)
+        })
+    }
+
+    /// What a shell from the store prints for `script`, confined to `work`.
+    #[cfg(target_os = "linux")]
+    fn confined_sh(work: &Path, script: &str) -> io::Result<std::process::Output> {
+        let mut sh = confined(&from_flake("LEDGER_TEST_SH")?, Some(work))?;
+        let sh = sh.args(["-c", script]).stdin(std::process::Stdio::null());
+        sh.output()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_confined_program_cannot_reach_a_server_on_loopback() -> io::Result<()> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let port = listener.local_addr()?.port();
+        let work = private_temp_dir()?;
+        // Bash connects when it writes to /dev/tcp.
+        let script = format!("echo hello > /dev/tcp/127.0.0.1/{port}");
+        let ran = confined_sh(&absolute(work.path())?, &script)?;
+        assert!(!ran.status.success(), "it connected: {ran:?}");
+        let seen = listener.accept().map_err(|e| e.kind());
+        assert_eq!(
+            seen.err(),
+            Some(io::ErrorKind::WouldBlock),
+            "the server saw it"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_confined_program_reads_and_writes_its_directory_and_nothing_else() -> io::Result<()> {
+        let work = private_temp_dir()?;
+        fs::write(work.path().join("input"), "its input")?;
+        // Stand-ins for the ledger, next to the work directory, and for a file in the home directory.
+        let ledger = tempfile::tempdir()?;
+        fs::write(ledger.path().join("l.db"), "the ledger")?;
+        let home = std::env::home_dir().ok_or_else(|| io::Error::other("no home directory"))?;
+        let home = tempfile::Builder::new()
+            .prefix(".ledger-test-")
+            .tempdir_in(home)?;
+        fs::write(home.path().join("key"), "a key")?;
+        let (ledger_dir, home_dir) = (ledger.path().display(), home.path().display());
+        let script = format!(
+            r#"for f in input {ledger_dir}/l.db {home_dir}/key; do line=; read -r line < "$f"; echo "$f: $line"; done
+            for d in . {ledger_dir} {home_dir} /nix/store /; do echo written > "$d/new"; done"#
+        );
+        let ran = confined_sh(&absolute(work.path())?, &script)?;
+        let read = format!("input: its input\n{ledger_dir}/l.db: \n{home_dir}/key: \n");
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), read);
+        assert!(
+            work.path().join("new").is_file(),
+            "it could not write its own directory"
+        );
+        assert!(
+            !ledger.path().join("new").exists(),
+            "it wrote next to the ledger"
+        );
+        assert!(
+            !home.path().join("new").exists(),
+            "it wrote in the home directory"
+        );
+        Ok(())
+    }
+
+    /// Every program the flake's shell names for the runner, and what makes it print its version.
+    #[cfg(target_os = "linux")]
+    const TOOLS: [(&str, &str); 6] = [
+        ("LEDGER_TOOL_RIZIN", "-v"),
+        ("LEDGER_TOOL_WAKARU", "--version"),
+        ("LEDGER_TOOL_WEBCRACK", "--version"),
+        ("LEDGER_TOOL_RETIRE", "--version"),
+        ("LEDGER_TOOL_AST_GREP", "--version"),
+        ("LEDGER_TOOL_FINGERPRINT", "--version"),
+    ];
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_tool_in_the_flake_starts_confined_and_says_its_version() -> io::Result<()> {
+        for (var, flag) in TOOLS {
+            let mut tool = confined(&from_flake(var)?, None)?;
+            let ran = tool.arg(flag).stdin(std::process::Stdio::null()).output()?;
+            let printed = String::from_utf8_lossy(&ran.stdout);
+            let first = printed.lines().next().unwrap_or_default();
+            let version = first.chars().any(|c| c.is_ascii_digit());
+            assert!(ran.status.success() && version, "{var}: {ran:?}");
+        }
         Ok(())
     }
 
