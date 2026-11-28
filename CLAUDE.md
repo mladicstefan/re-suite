@@ -23,6 +23,9 @@ target; all checks replay captures.
 - Hooks in `.claude/settings.json` run `cargo check -p <crate>` after `.rs` edits and
   `scripts/ci.sh` before `git commit`; they also guard protected config, hand-written
   versions and uncommented `#[allow]`.
+- Python (trial scripts, pypcode, kaitaistruct, Z3): `uv run --locked <script>`. Packages and the Python version
+  are pinned in `pyproject.toml`, `.python-version` and `uv.lock`; uv downloads both into `.venv`. Add a package
+  with `uv add` only, never with pip or the system's package manager.
 - New insta snapshots: `INSTA_UPDATE=always cargo test -p ledger-core`, then review the `.snap` diff.
 
 ## Rules

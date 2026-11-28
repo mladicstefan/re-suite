@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """How often do two lifters disagree about an instruction? RzIL (Rizin) against P-code (pypcode).
 
-usage: lifter-compare.py <program>...
+usage: uv run --locked docs/trials/lifter-compare.py <program>...
 
 For every instruction in a function Rizin recovers (with the analysis the ledger runs)
 both lifters are asked what the instruction does, and the answers are compared by
@@ -13,7 +13,7 @@ RzIL's `empty` counts as not lifted unless the instruction truly does nothing.
 P-code that calls a user-defined operation (CALLOTHER) counts as not lifted: it
 names the instruction instead of giving it a meaning.
 
-The programs are read, never run. Needs rizin and the pypcode Python package.
+The programs are read, never run. Needs rizin; pypcode comes from the repo's locked Python environment.
 """
 import bisect
 import collections
