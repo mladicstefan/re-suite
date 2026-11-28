@@ -57,8 +57,10 @@ Every new `ClaimKind` variant needs all four, in the same change:
 - A `format` claim's description is Kaitai Struct, and only part of it is read
   (`ledger_core::format`). A key or type outside that part is refused by name at
   admission, never skipped.
-- The checker walks the description itself (`ledger_checkers::format`). Do not
-  generate or run code for a description.
+- For now the checker walks the description itself (`ledger_checkers::format`).
+  The decision is to replace that reader with the Kaitai compiler's generated
+  parser, run in a worker process with time and memory limits. Do not grow the
+  reader; build the worker instead.
 - `tests/kaitai_oracle.rs` compares the reader with the Kaitai compiler's parser.
   Reading more of the language means adding a case there, and bumping
   `FormatChecker::VERSION`.

@@ -56,7 +56,7 @@ section 9).
 | Async runtime | Tokio, in the MCP server binary only | Never in a library crate |
 | CPU-bound checks | Rayon worker pool | Outside the write path |
 | Heavy checks | Separate worker processes | May be Python where the libraries live |
-| File and protocol formats | Kaitai Struct, a subset read by our own checker | No generated code runs; the Kaitai compiler is the test's second opinion |
+| File and protocol formats | Kaitai Struct, through the parser its own compiler generates, run in a worker process | Decided 28 November 2026. Until the worker is built, a subset of the language is read by our own checker (`ledger_checkers::format`), which the worker replaces |
 | Binary analysis | Rizin | Phase 2 onwards |
 | Second lifter | P-code through pypcode | Phase 5, for cross-checking |
 | Solver | Bitwuzla or Z3 | Phase 5, small scope first |
@@ -383,7 +383,9 @@ the ledger changes no status, and the write and read budgets hold.
 - [x] **Formats.** File claims through Kaitai Struct: a `format` claim
       carries a description, and the checker walks it over each file. It
       places fields at offsets a count decides (`docs/trials/format-claims.md`).
-      A subset of the language; protocol messages are not tried yet
+      A subset of the language, read by our own code: to be replaced by
+      the Kaitai compiler's parser in a worker process. Protocol messages
+      are not tried yet
 - [x] **First binary claims.** Facts exported from Rizin; structural
       claims checked "within the recovered code", assumptions listed.
       One claim kind so far, a direct call between two functions
