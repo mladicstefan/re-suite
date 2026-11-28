@@ -342,6 +342,13 @@ impl Store {
         self.index(id, kind, &stored)
     }
 
+    /// `<ledger>.sources`, where recovered source is laid out as files for agents to
+    /// read. What is there is a copy of evidence; the evidence is what counts.
+    #[must_use]
+    pub fn sources_dir(&self) -> PathBuf {
+        sidecar(&self.path, ".sources")
+    }
+
     /// Evidence bytes by hash, verified against that hash. `None` if there is no such file.
     /// A file is hashed on its first read and again only once its length or modification
     /// time is no longer what it was then.

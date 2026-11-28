@@ -60,5 +60,5 @@ findings your next step depends on, not every line.
   (playbook 8).
 - **Only a server or a CDN.** Map the API from the captured traffic (playbook 5).
 
-Playbooks 3 onward are not written yet. Until they are, file the claims, say what was
+Playbooks 4 onward are not written yet. Until they are, file the claims, say what was
 found, and tell the person which playbook comes next.

@@ -84,7 +84,9 @@ Every new `ClaimKind` variant needs all four, in the same change:
   names (its exchanges, or its scripts' sources) is copied in beside it, each under
   its id. Only the session is the recorded input: it names the rest by hash. A
   session that names evidence the ledger lacks is refused before anything starts.
-  Add what a tool reads as a `Reads` case, never as a branch for one tool.
+  Add what a tool reads as a `Reads` case, never as a branch for one tool. A file
+  is named by its id and the adapter's `named` suffix (`.js` for Wakaru, which
+  names a script that is no bundle after its input).
 - A tool's reported version changes whenever its output could. A wrapper of our own
   says its own version next to its library's (`reading` in `tools/fingerprint`).
 - Every run is confined by `ledger_os::confined`, and the runner has no other way
@@ -107,6 +109,17 @@ Every new `ClaimKind` variant needs all four, in the same change:
   the version it reported, the inputs and the output, all evidence the ledger
   holds. The same tool, version and inputs never run twice. A file stored as it
   is, such as a program or a script, is `artifact` evidence.
+- A tool may also leave files under `out` in its directory. They are untrusted:
+  after the run the runner reads them back and refuses all of them for a link, a
+  device, a name that is not a `ModulePath` (relative, plain names, nothing that
+  climbs out), or more than `MAX_WRITTEN_FILES`, `MAX_WRITTEN_FILE` or
+  `MAX_WRITTEN`. What the adapter keeps is stored as `artifact` evidence, one piece
+  per file, then the one record that names them; `Event::Derived` names the record.
+  Kinds are checked before the first write, so a refused run records nothing.
+- `<ledger>.sources/<tree id>/` holds a `source_tree`'s modules as files for agents
+  to read with their own tools. It is a copy of evidence, owner-only, written whole
+  once (`ledger_os::write_tree_once`) and laid out again from the evidence when it
+  is gone. Nothing reads it back as evidence.
 
 ## Live captures are a person's
 - Memory of a running process is read by `ledger-capture` only, for a person at a
@@ -127,9 +140,10 @@ Every new `ClaimKind` variant needs all four, in the same change:
 
 ## Playbooks
 - A playbook is a file in `playbooks/` and one row in `ledger-mcp`'s
-  `playbooks::PLAYBOOKS`: an id, a title, a function of the ledger that says
-  whether it applies, one line saying why, and the file compiled in. Adding one
-  changes nothing else.
+  `playbooks::PLAYBOOKS`: an id, a title, a function of the ledger (and the store,
+  for evidence the ledger names but does not read, such as a session's scripts)
+  that says whether it applies, one line saying why, and the file compiled in.
+  Adding one changes nothing else.
 - Write it in short, plain sentences, and say what the agent cannot do itself.
 
 ## Compile time first

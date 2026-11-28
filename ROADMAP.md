@@ -58,9 +58,9 @@ section 9).
 | Heavy checks | Separate worker processes | May be Python where the libraries live |
 | File and protocol formats | Kaitai Struct, through the parser its own compiler generates, run in a worker process | Decided 28 November 2026. Until the worker is built, a subset of the language is read by our own checker (`ledger_checkers::format`), which the worker replaces |
 | Binary analysis | Rizin | Phase 2 onwards; paused |
-| Outside tools | Run in one place, each confined by bubblewrap (Linux only so far), with time, memory and output limits; their output is stored as evidence | Checkers stay in-process and pure. Phase 2W |
+| Outside tools | Run in one place, each confined by bubblewrap (Linux only so far), with time, memory and output limits; what they print and the files they leave are stored as evidence | Checkers stay in-process and pure. Phase 2W |
 | Web capture | Chromium over the DevTools Protocol; mitmproxy for other clients | Only for a person at a terminal who approves the hosts |
-| Minified JavaScript | Source maps, Wakaru, webcrack | Phase 2W |
+| Minified JavaScript | Source maps, Wakaru, webcrack | Wakaru splits a script into modules, with the bytes each came from. Source maps and webcrack not yet |
 | Technology fingerprints | Wappalyzer rules on saved captures; retire.js on script contents | Phase 2W |
 | Searching code | ast-grep | Phase 2W |
 | Second lifter | P-code through pypcode | Phase 5, for cross-checking |
@@ -450,7 +450,9 @@ Two pieces every playbook stands on:
       the same run is not made twice. Checkers stay in-process and pure.
       Rizin runs through it, confined by bubblewrap with no network and
       no host files but the Nix store, and stopped past its memory or
-      output limit
+      output limit. A tool can also leave files: each becomes evidence of
+      its own, within limits on their number and size, and one record names
+      them
 - [x] **Every tool is pinned.** Nix for programs, a lockfile for npm
       packages: Wakaru, webcrack, retire.js, ast-grep, mitmproxy, wabt,
       wasm-tools, prettier, and a Wappalyzer rule engine that runs on
@@ -475,10 +477,22 @@ The playbooks:
       tested on a hand-written session. Open: libraries from script contents;
       retire.js found none in bundled code in the trial. A repeated run starts no
       run, but each new server asks the tool its version once
-- [ ] **3. Recover source from minified JavaScript.** A captured source
+- [x] **3. Recover source from minified JavaScript.** A captured source
       map first; otherwise unbundle and unminify, with library code set
       aside. Recovered modules are derived evidence; names stay the
-      agent's reading
+      agent's reading.
+      Built: Wakaru on one captured script (`--unpack=auto`), each module
+      `artifact` evidence of its own and a `source_tree` record of the bytes
+      of the script each came from, with the module that holds a given byte;
+      the modules laid out as files under `<ledger>.sources/`; `ask` lists a
+      session's scripts. Tested on a hand-made webpack 5 bundle; 105 modules
+      from the 640 KB Vite build of the trial. Open: a source map's original
+      sources. Wakaru's `extract` reads a `.map` file, not a script, so an
+      inline map needs decoding first and its sources come with no byte
+      ranges of the script; a map at an address is only named, since nothing
+      fetches it. Library code is set aside by the playbook's advice, not by
+      the server. Storing a tree costs about four disk flushes per module
+      (3.3 s for 105 modules on this disk); the writes could share commits
 - [ ] **4. Find the API in the code.** Endpoints, GraphQL documents and
       secrets the scripts name, and which of them no capture shows
 - [ ] **5. Map the API from traffic.** `ask` lists endpoints no claim

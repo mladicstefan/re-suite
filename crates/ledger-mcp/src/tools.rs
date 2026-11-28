@@ -12,10 +12,12 @@ use std::time::Duration;
 use ledger_checkers::{
     CHECKERS, CheckError, MAX_PARSED_EVIDENCE, check_claim, checker_of, har_exchanges, is_about,
 };
+use ledger_core::session::{Script, SourceMap};
+use ledger_core::source_tree::Split;
 use ledger_core::{
     BinaryFacts, Capture, CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event,
-    EvidenceId, EvidenceKind, HttpExchange, HttpRequest, HttpResponse, Ledger, Session, Status,
-    TechnologyFacts, Verdict, admit,
+    EvidenceId, EvidenceKind, HttpExchange, HttpRequest, HttpResponse, Ledger, Session, SourceTree,
+    Status, TechnologyFacts, Verdict, admit,
 };
 use ledger_store::{Snapshot, Store, StoreError};
 use schemars::JsonSchema;
@@ -515,7 +517,8 @@ pub enum About {
     /// What would be put on hold if a claim failed: needs `claim`.
     Affected,
     /// Which captures belong to an endpoint: needs `subject`, written as an
-    /// endpoint such as `GET api.example.com/users/{id}`.
+    /// endpoint such as `GET api.example.com/users/{id}`. With a session's id as
+    /// `subject`, the scripts it holds.
     Evidence,
     /// Which playbooks apply to what this ledger holds; with `subject`, the text of
     /// the playbook of that id.
@@ -548,8 +551,12 @@ pub fn ask(
     let snapshot = store.snapshot();
     let ledger = &snapshot.ledger;
     if let About::Evidence = about {
-        let endpoint = subject.ok_or_else(|| needs("evidence", "subject"))?;
-        return captures_of(store, &snapshot, endpoint, after);
+        let subject = subject.ok_or_else(|| needs("evidence", "subject"))?;
+        // An endpoint always has a space after its method; an id is hex alone.
+        if subject.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return scripts_of(store, &snapshot, subject, after);
+        }
+        return captures_of(store, &snapshot, subject, after);
     }
     let wanted: Filter<'_> = match about {
         About::All => Box::new(|_, _, _| true),
@@ -562,7 +569,10 @@ pub fn ask(
             Box::new(move |_, claim, _| claim.subject() == subject)
         }
         About::Evidence => return Err(needs("evidence", "subject")),
-        About::Playbooks => return Ok(stamp(&snapshot, &playbooks::answer(ledger, subject)?)),
+        About::Playbooks => {
+            let answer = playbooks::answer(store, ledger, subject)?;
+            return Ok(stamp(&snapshot, &answer));
+        }
         About::OnHold => Box::new(|_, _, status| status == Status::Blocked),
         About::Affected => {
             let id = find_claim(ledger, claim.ok_or_else(|| needs("affected", "claim"))?)?;
@@ -910,9 +920,157 @@ pub fn made(store: &Store, output: &EvidenceId) -> Result<String, Rejection> {
                 rmcp::serde_json::from_slice(&stored()?).map_err(unreadable)?;
             body.push_str(&read_on_hosts(&facts));
         }
+        Some(EvidenceKind::SourceTree) => {
+            let tree = SourceTree::read(&stored()?).map_err(|why| {
+                let next = "Tell the human: the stored record no longer reads.";
+                reject("evidence_malformed", output, format!("{why}."), next)
+            })?;
+            body.push_str(&laid_out(store, output, &tree)?);
+        }
         _ => {}
     }
     Ok(stamp(&store.snapshot(), &body))
+}
+
+/// Lays the modules of the tree `id` out as files under `<ledger>.sources/<id>`, once,
+/// and says where, how many there are and which are largest.
+fn laid_out(store: &Store, id: &EvidenceId, tree: &SourceTree) -> Result<String, Rejection> {
+    let unwritable = |e: std::io::Error| {
+        let message = format!("Its modules could not be laid out as files: {e}.");
+        let next = "The tree is stored. Retry once, then tell the human.";
+        reject("files_unwritable", id, message, next)
+    };
+    let mut texts = Vec::with_capacity(tree.modules().len());
+    for (path, module) in tree.modules() {
+        let text = store.evidence(&module.source)?;
+        texts.push((
+            path,
+            text.ok_or_else(|| unknown_evidence(module.source.as_str()))?,
+        ));
+    }
+    let sources = store.sources_dir();
+    ledger_os::create_private_dir(&sources).map_err(unwritable)?;
+    let dir = sources.join(id.as_str());
+    let files = (texts.iter()).map(|(path, text)| (std::path::Path::new(path.as_str()), &text[..]));
+    ledger_os::write_tree_once(&dir, files).map_err(unwritable)?;
+    let dir = ledger_os::absolute(&dir).map_err(unwritable)?;
+    let mut sizes: Vec<(usize, &str)> = (texts.iter())
+        .map(|(path, text)| (text.len(), path.as_str()))
+        .collect();
+    sizes.sort_by(|(a, a_path), (b, b_path)| b.cmp(a).then(a_path.cmp(b_path)));
+    let largest: Vec<String> = (sizes.iter().take(SHOWN))
+        .map(|(size, path)| format!("{path} {size} bytes"))
+        .collect();
+    let split = match tree.split() {
+        Split::Structural => "structurally",
+        Split::Heuristic => "by a heuristic, so where one ends is a guess",
+    };
+    Ok(format!(
+        "\n{} modules, read as {} and split {split}\nfiles in {}\nlargest: {}",
+        tree.modules().len(),
+        tree.format(),
+        dir.display(),
+        largest.join(", ")
+    ))
+}
+
+/// The tree recovered from each script, by any tool at any version.
+pub fn recovered(ledger: &Ledger) -> BTreeMap<&EvidenceId, &EvidenceId> {
+    let trees = ledger.evidence_of(EvidenceKind::SourceTree);
+    let from = |tree| Some((ledger.derivation_of(tree)?.1.first()?, tree));
+    trees.filter_map(from).collect()
+}
+
+/// The record of the session `id`.
+pub fn session(store: &Store, id: &EvidenceId) -> Result<Session, Rejection> {
+    let record = store
+        .evidence(id)?
+        .ok_or_else(|| unknown_evidence(id.as_str()))?;
+    Session::read(&record).map_err(|why| {
+        let next = "Import the capture file again with add_evidence kind=session.";
+        reject("evidence_malformed", id, format!("{why}."), next)
+    })
+}
+
+/// An address as it is shown: the query string and the fragment can hold keys.
+fn shown(address: &str) -> &str {
+    let address = address.split(['?', '#']).next().unwrap_or_default();
+    address
+        .char_indices()
+        .nth(SENTENCE)
+        .map_or(address, |(at, _)| &address[..at])
+}
+
+/// One page of the scripts the session `id` holds, one row per source in id order:
+/// its size, the address it was parsed from, its source map, and the tree recovered
+/// from it.
+fn scripts_of(
+    store: &Store,
+    snapshot: &Snapshot,
+    id: &str,
+    after: Option<&str>,
+) -> Result<String, Rejection> {
+    let ledger = &snapshot.ledger;
+    let session_id = only(ledger.evidence_starting(id), id, unknown_evidence)?;
+    if ledger.evidence_kind(session_id) != Some(EvidenceKind::Session) {
+        return Err(reject(
+            "evidence_not_a_session",
+            id,
+            "about=evidence with an id lists a session's scripts, and this is not a session.",
+            "Give a session's id, or an endpoint such as `GET api.example.com/users/{id}`.",
+        ));
+    }
+    let record = session(store, session_id)?;
+    let mut sources: BTreeMap<&EvidenceId, Vec<&Script>> = BTreeMap::new();
+    for script in record.scripts() {
+        sources.entry(&script.source).or_default().push(script);
+    }
+    let cursor = (after.map(|text| only(ledger.evidence_starting(text), text, unknown_evidence)))
+        .transpose()?;
+    let trees = recovered(ledger);
+    let mut out = format!(
+        "scripts of session {}: {}\n",
+        short(session_id.as_str()),
+        sources.len()
+    );
+    let mut rows = (sources.iter()).filter(|(source, _)| cursor.is_none_or(|c| *source > &c));
+    let mut last = None;
+    for (source, scripts) in rows.by_ref().take(PAGE) {
+        let size = store
+            .evidence(source)?
+            .map_or_else(|| "missing".into(), |s| format!("{} bytes", s.len()));
+        let address = scripts.first().map_or("", |s| shown(s.address.as_str()));
+        let more = match scripts.len().saturating_sub(1) {
+            0 => String::new(),
+            more => format!(" and {more} more addresses"),
+        };
+        let tree = trees.get(source).map_or_else(
+            || "no tree yet".into(),
+            |t| format!("tree {}", short(t.as_str())),
+        );
+        let map = match scripts.iter().find_map(|s| s.source_map.as_ref()) {
+            None => String::new(),
+            Some(SourceMap::Inline) => "; source map inline, which nothing reads yet".into(),
+            Some(SourceMap::At(at)) => format!(
+                "; source map at {}, which only the person can get, by capturing that address",
+                shown(at)
+            ),
+        };
+        let _ = writeln!(
+            out,
+            "script {}  {size}  {address}{more}  {tree}{map}",
+            short(source.as_str())
+        );
+        last = Some(source);
+    }
+    match (last, rows.next()) {
+        (Some(last), Some(_)) => {
+            let _ = write!(out, "more: ask again with after={}", short(last.as_str()));
+        }
+        (None, _) => out.push_str("nothing"),
+        _ => out.push_str("end"),
+    }
+    Ok(stamp(snapshot, &out))
 }
 
 /// The rules' names for security services that are no bot wall: a header every HTTPS
@@ -1048,13 +1206,19 @@ pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<Str
     if kind == EvidenceKind::Session {
         return add_session(store, path);
     }
-    if kind == EvidenceKind::TechnologyFacts {
-        return Err(reject(
-            "evidence_made_by_tool",
-            "path",
+    let made_by_tool = match kind {
+        EvidenceKind::TechnologyFacts => Some((
             "Technology facts are made only by the fingerprint tool, from a session in this ledger.",
             "Nothing was recorded. Call add_evidence kind=technology_facts tool=fingerprint inputs=[<session id>].",
-        ));
+        )),
+        EvidenceKind::SourceTree => Some((
+            "A source tree is made only by the wakaru tool, from a script in this ledger.",
+            "Nothing was recorded. Call add_evidence kind=source_tree tool=wakaru inputs=[<script id>].",
+        )),
+        _ => None,
+    };
+    if let Some((message, next)) = made_by_tool {
+        return Err(reject("evidence_made_by_tool", "path", message, next));
     }
     if kind == EvidenceKind::BinaryFacts {
         let bytes = read_whole(path, MAX_PARSED_EVIDENCE as u64)?;
@@ -1686,6 +1850,7 @@ mod tests {
             tool,
             [session.clone()].into(),
             printed.as_bytes(),
+            runner::Wrote::new(),
         );
         Ok(facts.map_err(|r| r.to_string())?)
     }
@@ -1850,7 +2015,14 @@ mod tests {
             id: "rizin".into(),
             version: "0.9.1 @ linux-x86-64".into(),
         };
-        let facts = runner::record(&store, &RIZIN, rizin, inputs, output.as_bytes());
+        let facts = runner::record(
+            &store,
+            &RIZIN,
+            rizin,
+            inputs,
+            output.as_bytes(),
+            runner::Wrote::new(),
+        );
         let added = made(&store, &facts.map_err(|r| r.to_string())?).map_err(|r| r.to_string())?;
         let facts = id_in(&added).to_owned();
         // Facts exported before can be added as a file; anything else under that kind cannot.
@@ -1925,7 +2097,14 @@ mod tests {
             id: "rizin".into(),
             version: "0.9.1".into(),
         };
-        let refused = runner::record(&store, &RIZIN, rizin, BTreeSet::new(), output.as_bytes());
+        let refused = runner::record(
+            &store,
+            &RIZIN,
+            rizin,
+            BTreeSet::new(),
+            output.as_bytes(),
+            runner::Wrote::new(),
+        );
         let refused = refused.err().ok_or("stored")?;
         assert_eq!(refused.code, "evidence_too_large");
         assert!(refused.next.starts_with("No output was recorded."));

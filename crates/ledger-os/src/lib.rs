@@ -2,6 +2,7 @@
 //! API. Each item picks the system's behaviour at compile time with `#[cfg]`;
 //! nothing here asks which system it is on while running.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write as _};
@@ -113,6 +114,64 @@ pub fn copy_once<N: fmt::Display>(
     let named = named?;
     sync_dir(dir)?;
     Ok(named)
+}
+
+/// Creates the directory `to` holding each file of `files` at its path, which is
+/// relative and only names, for a directory named after its content and never changed.
+/// Everything [`write_once`] promises for a file holds for the directory: it is
+/// written under another name and renamed into place, so `to` never holds part of
+/// the files, and when this returns they are on the disk. Only this user can open
+/// it. If `to` is there already it is left as it is.
+///
+/// # Errors
+/// A path is absolute or climbs out, two files have the same path, or a file cannot
+/// be written, renamed into place or flushed.
+pub fn write_tree_once<'a>(
+    to: &Path,
+    files: impl IntoIterator<Item = (&'a Path, &'a [u8])>,
+) -> io::Result<()> {
+    if !to.is_dir() {
+        let tmp = temp(parent(to));
+        let written = write_tree(&tmp, files).and_then(|()| fs::rename(&tmp, to));
+        if let Err(e) = written {
+            let _ = fs::remove_dir_all(&tmp);
+            // Another writer of the same content got there first; see `write_once`.
+            if !to.is_dir() {
+                return Err(e);
+            }
+        }
+    }
+    sync_dir(parent(to))
+}
+
+/// Writes `files` into the new directory `dir`, flushing each file and each directory.
+fn write_tree<'a>(
+    dir: &Path,
+    files: impl IntoIterator<Item = (&'a Path, &'a [u8])>,
+) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    owner_only(&mut builder);
+    builder.create(dir)?;
+    builder.recursive(true);
+    let mut made = BTreeSet::from([dir.to_path_buf()]);
+    for (path, bytes) in files {
+        let named = |c| matches!(c, std::path::Component::Normal(_));
+        if path.as_os_str().is_empty() || !path.components().all(named) {
+            let why = format!("{} is not a relative path of names", path.display());
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, why));
+        }
+        for above in path.ancestors().skip(1) {
+            let above = dir.join(above);
+            if !made.contains(&above) {
+                builder.create(&above)?;
+                made.insert(above);
+            }
+        }
+        let mut file = private().open(dir.join(path))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    made.iter().try_for_each(|dir| sync_dir(dir))
 }
 
 /// A name in `dir` for a file being written, which no other writer in any process
@@ -595,6 +654,54 @@ mod tests {
     }
 
     #[test]
+    fn a_tree_is_written_whole_once_and_names_nothing_outside_it() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let to = dir.path().join("tree");
+        let files = |pairs: &[(&'static str, &'static [u8])]| {
+            let files = pairs.iter().map(|&(path, bytes)| (Path::new(path), bytes));
+            files.collect::<Vec<_>>()
+        };
+        write_tree_once(
+            &to,
+            files(&[
+                ("entry.js", b"one"),
+                ("src/a/b.js", b"two"),
+                ("src/c.js", b""),
+            ]),
+        )?;
+        let read = |path: &str| fs::read(to.join(path));
+        assert_eq!(
+            (read("entry.js")?, read("src/a/b.js")?, read("src/c.js")?),
+            (b"one".to_vec(), b"two".to_vec(), Vec::new())
+        );
+        // A second writer of the same name changes nothing and is not an error.
+        write_tree_once(&to, files(&[("entry.js", b"other")]))?;
+        assert_eq!(read("entry.js")?, b"one");
+        assert!(!to.join("other").exists());
+        // A path that leaves the directory, or two files at one path, write nothing at all.
+        let refused = [
+            &[("ok.js", b"x" as &[u8]), ("../up.js", b"x")][..],
+            &[("ok.js", b"x"), ("/etc/x.js", b"x")],
+            &[("ok.js", b"x"), ("", b"x")],
+            &[("ok.js", b"x"), ("ok.js", b"y")],
+            &[("a", b"x"), ("a/b.js", b"y")],
+        ];
+        for (n, pairs) in refused.into_iter().enumerate() {
+            let at = dir.path().join(format!("refused-{n}"));
+            assert!(write_tree_once(&at, files(pairs)).is_err(), "{pairs:?}");
+            assert!(!at.exists());
+        }
+        assert!(!dir.path().join("up.js").exists());
+        let names: Vec<_> = fs::read_dir(dir.path())?.collect::<Result<_, _>>()?;
+        assert_eq!(
+            names.len(),
+            1,
+            "a temporary directory was left behind: {names:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_regular_file_is_copied_once_under_the_name_of_its_bytes() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let (from, to) = (dir.path().join("capture"), dir.path().join("store"));
@@ -646,6 +753,14 @@ mod tests {
         let mode = |path: &Path| fs::metadata(path).map(|m| m.permissions().mode() & 0o777);
         assert_eq!(mode(&evidence)?, 0o700);
         assert_eq!(mode(&evidence.join("key"))?, 0o600);
+        let tree = dir.path().join("tree");
+        write_tree_once(&tree, [(Path::new("src/a.js"), b"code" as &[u8])])?;
+        let modes = [
+            mode(&tree)?,
+            mode(&tree.join("src"))?,
+            mode(&tree.join("src/a.js"))?,
+        ];
+        assert_eq!(modes, [0o700, 0o700, 0o600]);
         let work = private_temp_dir()?;
         let path = work.path().to_path_buf();
         fs::write(path.join("input"), b"program")?;

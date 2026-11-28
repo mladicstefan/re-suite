@@ -6,22 +6,24 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use ledger_core::{EvidenceId, EvidenceKind, Ledger};
+use ledger_store::Store;
 
 use crate::runner::FINGERPRINT;
-use crate::tools::{Rejection, reject};
+use crate::tools::{Rejection, recovered, reject, session};
 
 struct Playbook {
     /// The name agents ask for it by.
     id: &'static str,
     title: &'static str,
-    /// Whether it applies to what the ledger holds now.
-    applies: fn(&Ledger) -> bool,
+    /// Whether it applies to what the ledger holds now. The store is there for
+    /// evidence the ledger names but does not read, such as a session's scripts.
+    applies: fn(&Store, &Ledger) -> bool,
     /// Why it applies, in one line.
     why: &'static str,
     text: &'static str,
 }
 
-static PLAYBOOKS: [Playbook; 2] = [
+static PLAYBOOKS: [Playbook; 3] = [
     Playbook {
         id: "capture-a-session",
         title: "1. Capture a session",
@@ -36,13 +38,20 @@ static PLAYBOOKS: [Playbook; 2] = [
         why: "the ledger holds a session that no fingerprint run has read",
         text: include_str!("../../../playbooks/web/2-fingerprint-the-stack.md"),
     },
+    Playbook {
+        id: "recover-source",
+        title: "3. Recover source from minified JavaScript",
+        applies: holds_an_unrecovered_script,
+        why: "a session holds a script that no source tree was recovered from",
+        text: include_str!("../../../playbooks/web/3-recover-source.md"),
+    },
 ];
 
-fn holds_no_session(ledger: &Ledger) -> bool {
+fn holds_no_session(_: &Store, ledger: &Ledger) -> bool {
     ledger.evidence_of(EvidenceKind::Session).next().is_none()
 }
 
-fn holds_an_unread_session(ledger: &Ledger) -> bool {
+fn holds_an_unread_session(_: &Store, ledger: &Ledger) -> bool {
     let fingerprinted = |facts| {
         let run = ledger.derivation_of(facts);
         run.filter(|(tool, _)| tool.id == FINGERPRINT.id)
@@ -56,12 +65,23 @@ fn holds_an_unread_session(ledger: &Ledger) -> bool {
         .any(|session| !read.contains(session))
 }
 
+/// A session whose record does not read counts too: listing its scripts says why.
+fn holds_an_unrecovered_script(store: &Store, ledger: &Ledger) -> bool {
+    let recovered = recovered(ledger);
+    ledger.evidence_of(EvidenceKind::Session).any(|id| {
+        session(store, id).map_or(true, |record| {
+            let mut scripts = record.scripts().iter();
+            scripts.any(|script| !recovered.contains_key(&script.source))
+        })
+    })
+}
+
 /// The playbooks that apply to what `ledger` holds, one line each, or the text of
 /// the one called `id`.
 ///
 /// # Errors
 /// No playbook is called `id`.
-pub fn answer(ledger: &Ledger, id: Option<&str>) -> Result<String, Rejection> {
+pub fn answer(store: &Store, ledger: &Ledger, id: Option<&str>) -> Result<String, Rejection> {
     if let Some(id) = id {
         let found = PLAYBOOKS.iter().find(|playbook| playbook.id == id);
         return found
@@ -79,7 +99,7 @@ pub fn answer(ledger: &Ledger, id: Option<&str>) -> Result<String, Rejection> {
     let mut out = String::new();
     for playbook in PLAYBOOKS
         .iter()
-        .filter(|playbook| (playbook.applies)(ledger))
+        .filter(|playbook| (playbook.applies)(store, ledger))
     {
         let _ = writeln!(out, "{}  {}: {}", playbook.id, playbook.title, playbook.why);
     }

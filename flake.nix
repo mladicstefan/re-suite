@@ -111,12 +111,13 @@
           LEDGER_TOOL_RIZIN = "${pkgs.rizin}/bin/rizin";
           LEDGER_TOOL_FINGERPRINT = "${fingerprint}/bin/ledger-fingerprint";
           LEDGER_TOOL_CHROMIUM = "${pkgs.chromium}/bin/chromium";
-          # No adapter yet; ledger-os's tests start each one confined and ask its version.
           LEDGER_TOOL_WAKARU = "${wakaru}/bin/wakaru";
+          # No adapter yet; ledger-os's tests start each one confined and ask its version.
           LEDGER_TOOL_WEBCRACK = "${jsTools}/bin/webcrack";
           LEDGER_TOOL_RETIRE = "${jsTools}/bin/retire";
           LEDGER_TOOL_AST_GREP = "${pkgs.ast-grep}/bin/ast-grep";
           # The tests' stand-in for a tool: a shell from the store, the only place a confined tool sees.
+          # Its loadable builtins (lib/bash: mkdir, ln) let a stand-in leave files and links.
           LEDGER_TEST_SH = "${pkgs.bash}/bin/sh";
         };
     in

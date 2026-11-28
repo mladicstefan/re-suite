@@ -13,6 +13,8 @@ pub mod format;
 pub use format::Format;
 pub mod session;
 pub use session::Session;
+pub mod source_tree;
+pub use source_tree::SourceTree;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
@@ -1131,6 +1133,9 @@ pub enum EvidenceKind {
     Session,
     /// The technologies a rule set read in one session's responses, as [`TechnologyFacts`].
     TechnologyFacts,
+    /// The modules a tool recovered from one script, each `artifact` evidence of its
+    /// own, with the bytes of the script each came from, as [`SourceTree`].
+    SourceTree,
 }
 
 /// One function an analysis tool recovered.

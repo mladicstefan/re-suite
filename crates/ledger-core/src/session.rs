@@ -56,6 +56,39 @@ pub struct Frame {
     pub function: String,
 }
 
+impl Frame {
+    /// The byte of `source` the call is at, counted from 0: what a source tree is
+    /// looked up by. Lines end where JavaScript ends them, at `\n`, `\r\n`, `\r`,
+    /// U+2028 and U+2029, and a column counts UTF-16 code units, as the browser does.
+    /// `None` past the end of its line, or inside a character.
+    #[must_use]
+    pub fn offset_in(&self, source: &str) -> Option<usize> {
+        let ends = |c| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}');
+        let mut start = 0;
+        for _ in 1..self.line.get() {
+            let at = start + source[start..].find(ends)?;
+            let crlf = source[at..].starts_with("\r\n");
+            start = at
+                + if crlf {
+                    2
+                } else {
+                    source[at..].chars().next()?.len_utf8()
+                };
+        }
+        let mut column = 1;
+        for (at, c) in source[start..].char_indices() {
+            if column == self.column.get() {
+                return Some(start + at);
+            }
+            if ends(c) {
+                return None;
+            }
+            column += u32::try_from(c.len_utf16()).ok()?;
+        }
+        (column == self.column.get()).then_some(source.len())
+    }
+}
+
 /// One request the session sent: in a [`Session`] the exchange is the id of its
 /// `http_exchange` evidence, in a capture file the exchange itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -392,6 +425,56 @@ mod tests {
         assert_eq!(captured.sources, [source]);
         assert_eq!(Session::read(&captured.record)?, captured.session);
         Ok(())
+    }
+
+    #[test]
+    fn a_frame_names_the_byte_its_line_and_column_are_at() {
+        // "€" is 3 bytes and one UTF-16 unit, "🛒" 4 bytes and two units.
+        let source = "a\nb€c\r\nd🛒e\rf\u{2028}g";
+        let at = |line: u32, column: u32| {
+            let frame = Frame {
+                script: Address::new("https://shop.example/app.js")?,
+                line: NonZeroU32::new(line).ok_or("line 0")?,
+                column: NonZeroU32::new(column).ok_or("column 0")?,
+                function: String::new(),
+            };
+            Ok::<_, &'static str>(frame.offset_in(source))
+        };
+        let found = [
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (2, 1),
+            (2, 3),
+            (2, 4),
+            (3, 2),
+            (3, 3),
+            (3, 4),
+            (4, 1),
+            (5, 1),
+            (5, 2),
+            (6, 1),
+        ]
+        .map(|(line, column)| at(line, column));
+        let byte = |text: &str| source.find(text);
+        assert_eq!(
+            found,
+            [
+                Ok(Some(0)),
+                Ok(byte("\nb")),
+                Ok(None),
+                Ok(byte("b")),
+                Ok(byte("c")),
+                Ok(byte("\r\n")),
+                Ok(byte("🛒")),
+                Ok(None),
+                Ok(byte("e")),
+                Ok(byte("f")),
+                Ok(byte("g")),
+                Ok(Some(source.len())),
+                Ok(None),
+            ]
+        );
     }
 
     #[test]
