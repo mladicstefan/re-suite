@@ -57,7 +57,12 @@ section 9).
 | CPU-bound checks | Rayon worker pool | Outside the write path |
 | Heavy checks | Separate worker processes | May be Python where the libraries live |
 | File and protocol formats | Kaitai Struct, through the parser its own compiler generates, run in a worker process | Decided 28 November 2026. Until the worker is built, a subset of the language is read by our own checker (`ledger_checkers::format`), which the worker replaces |
-| Binary analysis | Rizin | Phase 2 onwards |
+| Binary analysis | Rizin | Phase 2 onwards; paused |
+| Outside tools | Run in one place as sandboxed processes; their output is stored as evidence | Checkers stay in-process and pure. Phase 2W |
+| Web capture | Chromium over the DevTools Protocol; mitmproxy for other clients | Only for a person at a terminal who approves the hosts |
+| Minified JavaScript | Source maps, Wakaru, webcrack | Phase 2W |
+| Technology fingerprints | Wappalyzer rules on saved captures; retire.js on script contents | Phase 2W |
+| Searching code | ast-grep, jsluice | Phase 2W |
 | Second lifter | P-code through pypcode | Phase 5, for cross-checking |
 | Solver | Bitwuzla or Z3 | Phase 5, small scope first |
 | Proof certificates | Lean 4, bit-level lemmas only | Phase 6, optional |
@@ -402,6 +407,83 @@ Done when all five target types have at least one checked claim kind, and
 a new build of a target produces a correct "holds / moved / failed"
 report.
 
+### Paused: binaries, file formats and live memory (TODO)
+
+Paused on 28 November 2026 so that web work comes first. Nothing here is
+dropped; it resumes after the web phase.
+
+- [ ] TODO: the first live capture of another process by a person, and an
+      agent working from it (the Live captures item above)
+- [ ] TODO: format descriptions through the Kaitai compiler's parser in a
+      worker process, replacing our own reader
+- [ ] TODO: more binary claim kinds; function starts from the exception
+      table; reruns that read binary facts
+- [ ] TODO: all of Phase 5
+
+### Phase 2W: Web, fully working
+
+Comes before Phase 3 and before any interface work: **the interface is not
+started until every box here is ticked.** The work is cut into playbooks,
+each a scenario an agent meets, the pinned tools it uses and the claims it
+ends in.
+
+Two pieces every playbook stands on:
+
+- [ ] **Tool output is evidence.** One crate starts outside processes,
+      sandboxed, time-limited and found by absolute path. What a tool
+      prints is stored as evidence, and the log records which tool, at
+      which version, read which inputs. Checkers stay in-process and
+      pure. Rizin moves into this
+- [ ] **Every tool is pinned.** Nix for programs, a lockfile for npm
+      packages: Wakaru, webcrack, retire.js, ast-grep, jsluice, mitmproxy,
+      wabt, wasm-tools, prettier, and a Wappalyzer rule engine that runs
+      on saved captures
+
+The playbooks:
+
+- [ ] **1. Capture a session.** A person at a terminal approves the hosts.
+      Chromium is driven over the DevTools Protocol with its cache off;
+      mitmproxy serves clients that are not browsers. The result is a
+      session: exchanges in order, the script and line that started each,
+      and every script's source
+- [ ] **2. Fingerprint the stack.** Offline, on a session: frameworks,
+      servers, CDNs and bot walls from headers, cookies, HTML and script
+      addresses, and libraries with versions from script contents. A
+      `uses_technology` claim, checked within what the rules detect. The
+      result picks the next playbook; a bot wall stops the agent
+- [ ] **3. Recover source from minified JavaScript.** A captured source
+      map first; otherwise unbundle and unminify, with library code set
+      aside. Recovered modules are derived evidence; names stay the
+      agent's reading
+- [ ] **4. Find the API in the code.** Endpoints, GraphQL documents and
+      secrets the scripts name, and which of them no capture shows
+- [ ] **5. Map the API from traffic.** `ask` lists endpoints no claim
+      covers; an endpoint can be scoped by content type and by a body
+      field; held claims export as OpenAPI, each statement marked with
+      what it held on
+- [ ] **6. Trace a request to its code.** From the session's record of
+      what started a request to the function in recovered source; a
+      claim that an endpoint's requests start there; signing keys as
+      secret evidence
+- [ ] **7. Sessions and login.** A flow claim: a value in one request
+      comes from an earlier response or cookie
+- [ ] **8. GraphQL, WebSocket and WebAssembly.** Operations and frames as
+      claims; a module's imports and exports as facts
+- [ ] **9. Compare two versions.** Rerun on a new session, plus which
+      modules changed
+- [ ] **Playbooks reach any agent.** The server lists the playbooks that
+      apply to what the ledger holds; they are files in this repository
+- [ ] **Trial.** One approved capture of a real site taken through every
+      playbook, with the three numbers of section 11
+
+Later, behind approval of each request: active tests (replaying a request
+with changes), fetching what the browser did not, captures on a schedule.
+
+Done when an agent that is given only the server and one approved session
+of a real site files held claims from every playbook, a deliberately wrong
+claim of each new kind is refuted, the export validates as OpenAPI, and a
+second session produces a correct "holds / moved / failed" report.
+
 ### Phase 3: The human layer, headless
 
 Everything the interface will need, built and tested with no pixels.
@@ -464,7 +546,7 @@ in their original format on the left, agent conversation on the right.
 Implementers do not choose the framework, restyle, or add interface
 features on their own initiative.
 
-### Phase 5: Trust for binaries (headless, may run alongside Phase 4)
+### Phase 5: Trust for binaries (TODO, paused with the rest of binary work)
 
 - [ ] Second lifter wired in; per-claim cross-check against concrete
       execution
