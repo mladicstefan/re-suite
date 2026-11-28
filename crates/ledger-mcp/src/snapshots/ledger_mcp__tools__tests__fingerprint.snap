@@ -1,0 +1,34 @@
+---
+source: crates/ledger-mcp/src/tools.rs
+expression: log
+---
+add_evidence tool=fingerprint
+seq 7
+evidence 8b67396aec93
+made by fingerprint 1, wappalyzergo v0.3.11 from evidence 5bcb499a4eeb
+api.shop.example: Express, Varnish 7.4
+shop.example: Cloudflare, Cloudflare Bot Management, Next.js 14.2.3, Nginx 1.25.3, jQuery 3.6.0
+bot wall or other security service: Cloudflare Bot Management on shop.example. Stop and tell the person; do not try to get around it.
+
+propose: shop.example runs Nginx 1.25.3
+seq 9
+held         a11fd4ad0b91  In the responses saved from `shop.example`, the Wappalyzer rules find Nginx 1.25.3 (what the rules read, not proof of what runs).
+
+propose: shop.example runs Nginx 1.24.0
+seq 11
+refuted      97e5f74fd908  In the responses saved from `shop.example`, the Wappalyzer rules find Nginx 1.24.0 (what the rules read, not proof of what runs).
+refuted by 8b67396aec93: the rules read Nginx on `shop.example` with version 1.25.3, not 1.24.0
+
+propose: shop.example runs Express
+seq 13
+refuted      d620e5c42944  In the responses saved from `shop.example`, the Wappalyzer rules find Express (what the rules read, not proof of what runs).
+refuted by 8b67396aec93: the rules read no Express on `shop.example`; they read: Cloudflare, Cloudflare Bot Management, Next.js 14.2.3, Nginx 1.25.3, jQuery 3.6.0
+
+explain: Nginx 1.25.3
+seq 13
+held         a11fd4ad0b91  In the responses saved from `shop.example`, the Wappalyzer rules find Nginx 1.25.3 (what the rules read, not proof of what runs).
+held on 1 runs (replayed, not proved)
+evidence 8b67396aec93 was made by fingerprint 1, wappalyzergo v0.3.11 from evidence 5bcb499a4eeb
+
+add_evidence kind=technology_facts path=<a facts file>
+REJECTED evidence_made_by_tool [path]: Technology facts are made only by the fingerprint tool, from a session in this ledger. Next: Nothing was recorded. Call add_evidence kind=technology_facts tool=fingerprint inputs=[<session id>].

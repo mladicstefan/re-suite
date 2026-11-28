@@ -469,7 +469,12 @@ The playbooks:
       servers, CDNs and bot walls from headers, cookies, HTML and script
       addresses, and libraries with versions from script contents. A
       `uses_technology` claim, checked within what the rules detect. The
-      result picks the next playbook; a bot wall stops the agent
+      result picks the next playbook; a bot wall stops the agent.
+      Built: the Wappalyzer rules on a session (`fingerprint`, `technology_facts`),
+      `uses_technology`, and a reply that stops the agent at a security service,
+      tested on a hand-written session. Open: libraries from script contents;
+      retire.js found none in bundled code in the trial. A repeated run starts no
+      run, but each new server asks the tool its version once
 - [ ] **3. Recover source from minified JavaScript.** A captured source
       map first; otherwise unbundle and unminify, with library code set
       aside. Recovered modules are derived evidence; names stay the

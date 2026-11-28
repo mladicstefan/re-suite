@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "uses(\"shop.example\", \"Nginx\", Some(\"1.25.3\")).sentence()"
+---
+In the responses saved from `shop.example`, the Wappalyzer rules find Nginx 1.25.3 (what the rules read, not proof of what runs).

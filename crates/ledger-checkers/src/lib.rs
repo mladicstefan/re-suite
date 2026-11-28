@@ -13,7 +13,8 @@ use hmac::{Hmac, KeyInit, Mac};
 use ledger_core::{
     BinaryFacts, Body, CheckerRef, ClaimId, ClaimKind, Counterexample, Endpoint, EvidenceId,
     EvidenceKind, FieldKind, Function, FunctionRef, HttpExchange, HttpRequest, MemoryLayout,
-    RequestSignature, ResponseSchema, SigAlgorithm, SigEncoding, SignedPart, Verdict,
+    RequestSignature, ResponseSchema, SigAlgorithm, SigEncoding, SignedPart, TechnologyFacts,
+    Verdict,
 };
 use md5::Digest as _;
 use rayon::prelude::*;
@@ -965,11 +966,76 @@ impl Checker<'_> for CallEdgeChecker {
     }
 }
 
+pub struct TechnologyChecker;
+
+impl Checker<'_> for TechnologyChecker {
+    const ID: &'static str = "uses_technology";
+    const VERSION: u32 = 1;
+    type Claim = ledger_core::UsesTechnology;
+    type Evidence = TechnologyFacts;
+
+    fn check(
+        &self,
+        claim: &Self::Claim,
+        evidence: &[Item<TechnologyFacts>],
+        deadline: Instant,
+    ) -> Result<Verdict, CheckError> {
+        let (name, host) = (&claim.technology, &claim.host);
+        // Facts with no answer from the host never read its responses, so they cannot refute the claim.
+        if let Some(blind) = evidence.iter().find(|it| read_on(&it.data, host).is_none()) {
+            return Err(CheckError::NotApplicable(
+                blind.id.clone(),
+                format!("facts that hold nothing for `{host}`"),
+            ));
+        }
+        Ok(replay(evidence, deadline, |facts| {
+            let found = read_on(facts, host).into_iter().flatten();
+            let named = found.clone().find(|(n, _)| n.eq_ignore_ascii_case(name));
+            match (named, &claim.version) {
+                (Some((_, t)), Some(version)) if !t.versions.contains(version) => {
+                    let read: Vec<&str> = t.versions.iter().map(String::as_str).collect();
+                    let read = match read.as_slice() {
+                        [] => String::from("no version"),
+                        read => format!("version {}", read.join(", ")),
+                    };
+                    Err(format!(
+                        "the rules read {name} on `{host}` with {read}, not {version}"
+                    ))
+                }
+                (Some(_), _) => Ok(()),
+                (None, _) => {
+                    let all: Vec<String> = found.map(|(n, t)| t.named(n)).collect();
+                    let all = if all.is_empty() {
+                        String::from("nothing they know")
+                    } else {
+                        all.join(", ")
+                    };
+                    Err(format!(
+                        "the rules read no {name} on `{host}`; they read: {all}"
+                    ))
+                }
+            }
+        }))
+    }
+}
+
+/// What the facts hold for `host`, if it answered in their session.
+fn read_on<'f>(
+    facts: &'f TechnologyFacts,
+    host: &str,
+) -> Option<&'f BTreeMap<String, ledger_core::Technology>> {
+    let mut hosts = facts.hosts.iter();
+    hosts
+        .find(|(h, _)| h.eq_ignore_ascii_case(host))
+        .map(|(_, found)| found)
+}
+
 /// Every checker with its version. A checker missing here would have its verdicts
 /// ignored once the log lists the current checkers, so `run` refuses to run one.
-pub const CHECKERS: [(&str, u32); 13] = [
+pub const CHECKERS: [(&str, u32); 14] = [
     (FormatChecker::ID, FormatChecker::VERSION),
     (CallEdgeChecker::ID, CallEdgeChecker::VERSION),
+    (TechnologyChecker::ID, TechnologyChecker::VERSION),
     (ResponseHeaderChecker::ID, ResponseHeaderChecker::VERSION),
     (StringTableChecker::ID, StringTableChecker::VERSION),
     (TaggedRecordsChecker::ID, TaggedRecordsChecker::VERSION),
@@ -990,6 +1056,7 @@ pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
     let (id, version) = match claim {
         ClaimKind::Format(_) => (FormatChecker::ID, FormatChecker::VERSION),
         ClaimKind::CallEdge(_) => (CallEdgeChecker::ID, CallEdgeChecker::VERSION),
+        ClaimKind::UsesTechnology(_) => (TechnologyChecker::ID, TechnologyChecker::VERSION),
         ClaimKind::ResponseHeader(_) => (ResponseHeaderChecker::ID, ResponseHeaderChecker::VERSION),
         ClaimKind::StringTable(_) => (StringTableChecker::ID, StringTableChecker::VERSION),
         ClaimKind::TaggedRecords(_) => (TaggedRecordsChecker::ID, TaggedRecordsChecker::VERSION),
@@ -1079,7 +1146,8 @@ fn scope(claim: &ClaimKind) -> Option<(&str, Scope)> {
         | ClaimKind::TaggedRecords(_)
         | ClaimKind::StringTable(_)
         | ClaimKind::Format(_)
-        | ClaimKind::CallEdge(_) => None,
+        | ClaimKind::CallEdge(_)
+        | ClaimKind::UsesTechnology(_) => None,
     }
 }
 
@@ -1328,15 +1396,13 @@ pub fn rizin_facts(tool: &str, output: &[u8]) -> Result<BinaryFacts, String> {
     })
 }
 
-/// The evidence as what a tool recovered from a binary.
-fn facts(evidence: &[Raw<'_>]) -> Result<Vec<Item<BinaryFacts>>, CheckError> {
+/// The evidence as what a tool recovered, stored as JSON of `kind`.
+fn facts<F: serde::de::DeserializeOwned>(
+    kind: EvidenceKind,
+    evidence: &[Raw<'_>],
+) -> Result<Vec<Item<F>>, CheckError> {
     let parse = |bytes| serde_json::from_slice(bytes).map_err(|e| e.to_string());
-    decode(
-        EvidenceKind::BinaryFacts,
-        MAX_PARSED_EVIDENCE,
-        evidence,
-        parse,
-    )
+    decode(kind, MAX_PARSED_EVIDENCE, evidence, parse)
 }
 
 /// The evidence as snapshots: files given as they are, and live captures with what
@@ -1422,7 +1488,14 @@ pub fn check_claim(
 ) -> Result<Verdict, CheckError> {
     match claim {
         ClaimKind::Format(c) => run(&FormatChecker, id, c, snapshots(evidence), limit),
-        ClaimKind::CallEdge(c) => run(&CallEdgeChecker, id, c, facts(evidence), limit),
+        ClaimKind::CallEdge(c) => {
+            let facts = facts(EvidenceKind::BinaryFacts, evidence);
+            run(&CallEdgeChecker, id, c, facts, limit)
+        }
+        ClaimKind::UsesTechnology(c) => {
+            let facts = facts(EvidenceKind::TechnologyFacts, evidence);
+            run(&TechnologyChecker, id, c, facts, limit)
+        }
         ClaimKind::ResponseHeader(c) => run(
             &ResponseHeaderChecker,
             id,
@@ -2711,6 +2784,93 @@ mod tests {
                 EvidenceKind::MemorySnapshot
             ),
             Err(CheckError::WrongEvidence(EvidenceKind::MemorySnapshot))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_technology_claim_holds_within_what_the_rules_read_on_its_host()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let technology = |versions: &[&str]| ledger_core::Technology {
+            versions: versions.iter().map(|&v| v.to_owned()).collect(),
+            categories: BTreeSet::from(["Web servers".to_owned()]),
+            exchanges: BTreeSet::from([EvidenceId::of(b"page")]),
+        };
+        let facts = TechnologyFacts {
+            tool: "fingerprint 1, wappalyzergo v0.3.11".into(),
+            session: EvidenceId::of(b"session"),
+            hosts: BTreeMap::from([
+                (
+                    "shop.example".to_owned(),
+                    BTreeMap::from([
+                        ("Cloudflare".to_owned(), technology(&[])),
+                        ("Nginx".to_owned(), technology(&["1.25.3"])),
+                    ]),
+                ),
+                ("api.shop.example".to_owned(), BTreeMap::new()),
+            ]),
+        };
+        let stored = serde_json::to_vec(&facts)?;
+        let check = |host: &str, technology: &str, version: Option<&str>| {
+            let claim = ClaimKind::UsesTechnology(ledger_core::UsesTechnology {
+                host: host.into(),
+                technology: technology.into(),
+                version: version.map(Into::into),
+            });
+            let evidence = (
+                EvidenceId::of(&stored),
+                EvidenceKind::TechnologyFacts,
+                &stored[..],
+            );
+            let limit = Duration::from_secs(5);
+            match check_claim(&ClaimId::of(b"c"), &claim, &[evidence], limit) {
+                Ok(Verdict::Held { .. }) => String::from("held"),
+                Ok(Verdict::Refuted { counterexample }) => counterexample.detail,
+                Ok(Verdict::Inconclusive { reason }) => format!("inconclusive: {reason}"),
+                Err(e @ CheckError::NotApplicable(..)) => format!("not applicable: {e}"),
+                Err(e) => format!("error: {e}"),
+            }
+        };
+        assert_eq!(check("shop.example", "Nginx", Some("1.25.3")), "held");
+        assert_eq!(check("Shop.Example", "nginx", None), "held");
+        assert_eq!(check("shop.example", "Cloudflare", None), "held");
+        assert_eq!(
+            check("shop.example", "Nginx", Some("1.24.0")),
+            "the rules read Nginx on `shop.example` with version 1.25.3, not 1.24.0"
+        );
+        assert_eq!(
+            check("shop.example", "Cloudflare", Some("2")),
+            "the rules read Cloudflare on `shop.example` with no version, not 2"
+        );
+        assert_eq!(
+            check("shop.example", "Express", None),
+            "the rules read no Express on `shop.example`; they read: Cloudflare, Nginx 1.25.3"
+        );
+        // A host that answered with nothing the rules know is read, and refutes.
+        assert_eq!(
+            check("api.shop.example", "Express", None),
+            "the rules read no Express on `api.shop.example`; they read: nothing they know"
+        );
+        // Facts from a session the host never answered in say nothing about it.
+        assert!(check("cdn.example", "Nginx", None).starts_with("not applicable: "));
+        let claim = ClaimKind::UsesTechnology(ledger_core::UsesTechnology {
+            host: "shop.example".into(),
+            technology: "Nginx".into(),
+            version: None,
+        });
+        let facts_as_exchange = (
+            EvidenceId::of(&stored),
+            EvidenceKind::HttpExchange,
+            &stored[..],
+        );
+        assert!(matches!(
+            check_claim(
+                &ClaimId::of(b"c"),
+                &claim,
+                &[facts_as_exchange],
+                Duration::from_secs(5)
+            ),
+            Err(CheckError::WrongEvidence(EvidenceKind::HttpExchange))
         ));
         Ok(())
     }

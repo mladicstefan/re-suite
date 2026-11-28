@@ -509,11 +509,51 @@ impl CallEdge {
     }
 }
 
+/// A host's saved responses show a technology, as the Wappalyzer rules read them.
+/// Checked on `technology_facts`, never on the live site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UsesTechnology {
+    /// As a request address writes it: `shop.example`, or `127.0.0.1:8080`.
+    pub host: String,
+    /// As the rules name it, such as `Nginx`.
+    pub technology: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+impl UsesTechnology {
+    /// Plain sentence shown to the human.
+    fn sentence(&self) -> String {
+        let version = self
+            .version
+            .as_ref()
+            .map_or_else(String::new, |v| format!(" {v}"));
+        format!(
+            "In the responses saved from `{}`, the Wappalyzer rules find {}{version} (what the rules read, not proof of what runs).",
+            self.host, self.technology
+        )
+    }
+
+    /// What admission asks of this kind.
+    fn admissible(&self) -> Result<(), String> {
+        let host =
+            !self.host.is_empty() && !self.host.contains(|c: char| c == '/' || c.is_whitespace());
+        let version = self.version.as_deref().is_none_or(|v| !v.trim().is_empty());
+        if !host || self.technology.trim().is_empty() || !version {
+            return Err(String::from(
+                "a technology claim needs a host as an address writes it, such as `shop.example`, a technology name and, if given, a version",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimKind {
     Format(Format),
     CallEdge(CallEdge),
+    UsesTechnology(UsesTechnology),
     ResponseHeader(ResponseHeader),
     StringTable(StringTable),
     TaggedRecords(TaggedRecords),
@@ -545,12 +585,13 @@ impl Claim {
         Ok(ClaimId::of(&serde_json::to_vec(self)?))
     }
 
-    /// What the claim is about: a type name or an endpoint.
+    /// What the claim is about: a type name, an endpoint, a binary or a host.
     #[must_use]
     pub const fn subject(&self) -> &str {
         match &self.kind {
             ClaimKind::Format(f) => f.type_name.as_str(),
             ClaimKind::CallEdge(c) => c.binary.as_str(),
+            ClaimKind::UsesTechnology(t) => t.host.as_str(),
             ClaimKind::ResponseHeader(h) => h.endpoint.as_str(),
             ClaimKind::StringTable(t) => t.type_name.as_str(),
             ClaimKind::TaggedRecords(t) => t.type_name.as_str(),
@@ -580,9 +621,10 @@ impl Claim {
             serde_json::to_value(&earlier.kind).ok()?,
         );
         // Two claims about one subject are still about different things if they name
-        // different headers, statuses or functions; one does not replace the other.
+        // different headers, statuses, functions or technologies; one does not replace the other.
         let topic = |kind: &serde_json::Value| {
-            ["header", "status", "caller", "callee"].map(|part| kind.get(part).cloned())
+            ["header", "status", "caller", "callee", "technology"]
+                .map(|part| kind.get(part).cloned())
         };
         if topic(&now) != topic(&was) {
             return None;
@@ -598,6 +640,7 @@ impl Claim {
         match &self.kind {
             ClaimKind::Format(c) => c.sentence(),
             ClaimKind::CallEdge(c) => c.sentence(),
+            ClaimKind::UsesTechnology(c) => c.sentence(),
             ClaimKind::ResponseHeader(c) => c.sentence(),
             ClaimKind::StringTable(c) => c.sentence(),
             ClaimKind::TaggedRecords(c) => c.sentence(),
@@ -1045,6 +1088,7 @@ pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
     let admissible = match &claim.kind {
         ClaimKind::Format(c) => c.admissible(),
         ClaimKind::CallEdge(c) => c.admissible(),
+        ClaimKind::UsesTechnology(c) => c.admissible(),
         ClaimKind::ResponseHeader(c) => c.admissible(),
         ClaimKind::StringTable(c) => c.admissible(),
         ClaimKind::TaggedRecords(c) => c.admissible(),
@@ -1085,6 +1129,8 @@ pub enum EvidenceKind {
     /// A browser session from `ledger-capture web`: its exchanges in order, the calls
     /// that sent each, and its scripts, as [`Session`].
     Session,
+    /// The technologies a rule set read in one session's responses, as [`TechnologyFacts`].
+    TechnologyFacts,
 }
 
 /// One function an analysis tool recovered.
@@ -1115,6 +1161,51 @@ pub struct BinaryFacts {
     /// Called addresses that stand for an imported symbol, with the symbol's name.
     #[serde(default)]
     pub imports: BTreeMap<u64, String>,
+}
+
+/// One technology a rule set read in a host's responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Technology {
+    /// The versions the rules read; empty when they read none.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub versions: BTreeSet<String>,
+    /// The rules' categories for it, such as `Web servers`.
+    #[serde(default)]
+    pub categories: BTreeSet<String>,
+    /// Exchanges it was read in, at most [`TechnologyFacts::LISTED`] of them.
+    #[serde(default)]
+    pub exchanges: BTreeSet<EvidenceId>,
+}
+
+/// Evidence format for `EvidenceKind::TechnologyFacts`: what a rule set read in the
+/// responses of one session, by host. A claim checked against it holds within what
+/// the rules read, which is not proof of what runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TechnologyFacts {
+    /// The tool and the version of its rule set.
+    pub tool: String,
+    /// The `session` evidence whose responses were read.
+    pub session: EvidenceId,
+    /// Every host that answered in the session, as a request address writes it, with
+    /// the technologies read in its responses by the name the rules give them.
+    pub hosts: BTreeMap<String, BTreeMap<String, Technology>>,
+}
+
+impl TechnologyFacts {
+    /// Exchanges kept per technology: enough to find one, not a copy of the session.
+    pub const LISTED: usize = 8;
+}
+
+impl Technology {
+    /// Its name as the rules give it, with the versions they read: `jQuery 1.12.4/3.6.0`.
+    #[must_use]
+    pub fn named(&self, name: &str) -> String {
+        let versions: Vec<&str> = self.versions.iter().map(String::as_str).collect();
+        match versions.as_slice() {
+            [] => name.to_owned(),
+            versions => format!("{name} {}", versions.join("/")),
+        }
+    }
 }
 
 /// What a human read off the running program when its memory was captured: a
@@ -2873,6 +2964,48 @@ mod tests {
         );
         assert!(admit(header(serde_json::json!(true))).is_ok());
         assert!(admit(header(serde_json::json!("a string is not a schema"))).is_err());
+    }
+
+    #[test]
+    fn a_technology_claim_names_a_host_and_a_technology() {
+        let uses = |host: &str, technology: &str, version: Option<&str>| Claim {
+            kind: ClaimKind::UsesTechnology(UsesTechnology {
+                host: host.into(),
+                technology: technology.into(),
+                version: version.map(Into::into),
+            }),
+            premises: BTreeSet::new(),
+        };
+        insta::assert_snapshot!(
+            "uses_technology",
+            uses("shop.example", "Nginx", Some("1.25.3")).sentence()
+        );
+        insta::assert_snapshot!(
+            "uses_technology_any_version",
+            uses("127.0.0.1:8080", "Express", None).sentence()
+        );
+        assert!(admit(uses("127.0.0.1:8080", "Express", None)).is_ok());
+        let refused = [
+            uses("", "Nginx", None),
+            uses("shop.example", "", None),
+            uses("shop.example", " ", None),
+            uses("shop.example", "Nginx", Some("")),
+            uses("https://shop.example/", "Nginx", None),
+        ];
+        for claim in refused {
+            assert!(admit(claim.clone()).is_err(), "{claim:?}");
+        }
+        // Another technology on the same host is another finding; another version of it revises it.
+        let nginx = uses("shop.example", "Nginx", Some("1.25.3"));
+        assert_eq!(
+            uses("shop.example", "Express", None).revision_of(&nginx),
+            None
+        );
+        let weaker = uses("shop.example", "Nginx", None).revision_of(&nginx);
+        assert_eq!(
+            weaker.map(|r| r.weaker),
+            Some(vec!["/version dropped".to_owned()])
+        );
     }
 
     /// The definition of status, as plain recursion. Exponential on shared premises.

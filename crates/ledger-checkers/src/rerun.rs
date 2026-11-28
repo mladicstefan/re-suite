@@ -88,6 +88,7 @@ fn claim_subject(kind: &ClaimKind) -> &str {
         ClaimKind::StringTable(c) => &c.type_name,
         ClaimKind::Format(c) => &c.type_name,
         ClaimKind::CallEdge(c) => &c.binary,
+        ClaimKind::UsesTechnology(c) => &c.host,
         ClaimKind::RequestSignature(c) => &c.endpoint,
         ClaimKind::RequestHeader(c) => &c.endpoint,
         ClaimKind::RequestBodySchema(c) => &c.endpoint,

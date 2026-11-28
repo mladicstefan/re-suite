@@ -15,7 +15,7 @@ use ledger_checkers::{
 use ledger_core::{
     BinaryFacts, Capture, CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event,
     EvidenceId, EvidenceKind, HttpExchange, HttpRequest, HttpResponse, Ledger, Session, Status,
-    Verdict, admit,
+    TechnologyFacts, Verdict, admit,
 };
 use ledger_store::{Snapshot, Store, StoreError};
 use schemars::JsonSchema;
@@ -873,37 +873,83 @@ fn derivation(ledger: &Ledger, id: &EvidenceId) -> Option<String> {
 }
 
 /// The reply to `add_evidence` for what a tool printed: its id, the run that made it
-/// and, for binary facts, how much was recovered.
+/// and what it found: for binary facts how much was recovered, for technology facts
+/// what the rules read on each host.
 ///
 /// # Errors
 /// The evidence cannot be read back.
 pub fn made(store: &Store, output: &EvidenceId) -> Result<String, Rejection> {
-    let (mut body, facts) = {
+    let (mut body, kind) = {
         let ledger = &store.snapshot().ledger;
         let mut body = format!("evidence {}", short(output.as_str()));
         if let Some(line) = derivation(ledger, output) {
             let _ = write!(body, "\n{line}");
         }
-        (
-            body,
-            ledger.evidence_kind(output) == Some(EvidenceKind::BinaryFacts),
-        )
+        (body, ledger.evidence_kind(output))
     };
-    if facts {
+    let stored = || -> Result<_, Rejection> {
         let stored = store.evidence(output)?;
-        let stored = stored.ok_or_else(|| unknown_evidence(output.as_str()))?;
-        let facts: BinaryFacts =
-            rmcp::serde_json::from_slice(&stored).map_err(|e| StoreError::Core(e.into()))?;
-        let calls: usize = facts.functions.iter().map(|f| f.calls.len()).sum();
-        let _ = write!(
-            body,
-            "\nrecovered from the program with sha256 {}: functions {}, direct calls {calls}, called imports {}",
-            short(&facts.sha256),
-            facts.functions.len(),
-            facts.imports.len(),
-        );
+        stored.ok_or_else(|| unknown_evidence(output.as_str()))
+    };
+    let unreadable = |e: rmcp::serde_json::Error| StoreError::Core(e.into());
+    match kind {
+        Some(EvidenceKind::BinaryFacts) => {
+            let facts: BinaryFacts =
+                rmcp::serde_json::from_slice(&stored()?).map_err(unreadable)?;
+            let calls: usize = facts.functions.iter().map(|f| f.calls.len()).sum();
+            let _ = write!(
+                body,
+                "\nrecovered from the program with sha256 {}: functions {}, direct calls {calls}, called imports {}",
+                short(&facts.sha256),
+                facts.functions.len(),
+                facts.imports.len(),
+            );
+        }
+        Some(EvidenceKind::TechnologyFacts) => {
+            let facts: TechnologyFacts =
+                rmcp::serde_json::from_slice(&stored()?).map_err(unreadable)?;
+            body.push_str(&read_on_hosts(&facts));
+        }
+        _ => {}
     }
     Ok(stamp(&store.snapshot(), &body))
+}
+
+/// The rules' names for security services that are no bot wall: a header every HTTPS
+/// site sends, and the ways HTTP asks for a login.
+const NOT_WALLS: [&str; 6] = ["HSTS", "Basic", "Digest", "Kerberos", "NTLM", "SPNEGO"];
+
+/// One line per host with what the rules read there and, when any of it is a security
+/// service that can stand between a site and a program, one line that stops the agent.
+fn read_on_hosts(facts: &TechnologyFacts) -> String {
+    let mut out = String::new();
+    let mut guards = Vec::new();
+    for (host, found) in &facts.hosts {
+        let mut named = Vec::with_capacity(found.len());
+        for (name, technology) in found {
+            if technology.categories.contains("Security") && !NOT_WALLS.contains(&name.as_str()) {
+                guards.push(format!("{name} on {host}"));
+            }
+            named.push(technology.named(name));
+        }
+        let named = if named.is_empty() {
+            String::from("nothing the rules know")
+        } else {
+            named.join(", ")
+        };
+        let _ = write!(out, "\n{host}: {named}");
+    }
+    if facts.hosts.is_empty() {
+        out.push_str("\nno host answered in this session");
+    }
+    if !guards.is_empty() {
+        let _ = write!(
+            out,
+            "\nbot wall or other security service: {}. Stop and tell the person; do not try to get around it.",
+            guards.join(", ")
+        );
+    }
+    out
 }
 
 /// The bytes of a file that is parsed whole: a regular file of at most `max` bytes.
@@ -947,13 +993,10 @@ fn add_session(store: &Store, path: &str) -> Result<String, Rejection> {
     })?;
     drop(bytes);
     let session = &captured.session;
-    let named = (session.exchanges().iter())
-        .map(|sent| (&sent.exchange, EvidenceKind::HttpExchange))
-        .chain((session.scripts().iter()).map(|script| (&script.source, EvidenceKind::Artifact)));
     // Checked before the first write, so that a refusal leaves nothing behind.
     {
         let ledger = &store.snapshot().ledger;
-        for (id, kind) in named {
+        for (id, kind) in session.named() {
             match ledger.evidence_kind(id) {
                 Some(stored) if stored != kind => {
                     return Err(StoreError::OtherKind(id.clone(), stored).into());
@@ -1004,6 +1047,14 @@ fn add_session(store: &Store, path: &str) -> Result<String, Rejection> {
 pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<String, Rejection> {
     if kind == EvidenceKind::Session {
         return add_session(store, path);
+    }
+    if kind == EvidenceKind::TechnologyFacts {
+        return Err(reject(
+            "evidence_made_by_tool",
+            "path",
+            "Technology facts are made only by the fingerprint tool, from a session in this ledger.",
+            "Nothing was recorded. Call add_evidence kind=technology_facts tool=fingerprint inputs=[<session id>].",
+        ));
     }
     if kind == EvidenceKind::BinaryFacts {
         let bytes = read_whole(path, MAX_PARSED_EVIDENCE as u64)?;
@@ -1102,6 +1153,7 @@ pub fn retract(store: &Store, claim: &str, reason: String) -> Result<String, Rej
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::FINGERPRINT;
     use ledger_checkers::rizin_facts;
     use ledger_core::{ClaimKind, MemoryLayout, RequestSignature, SigAlgorithm, SigEncoding};
 
@@ -1586,6 +1638,144 @@ mod tests {
     }
 
     const PLAYBOOK: &str = include_str!("../../../playbooks/web/1-capture-a-session.md");
+
+    /// The fixture session imported as an agent imports it, and the session's id.
+    fn stack(
+        store: &Store,
+        dir: &std::path::Path,
+    ) -> Result<EvidenceId, Box<dyn std::error::Error>> {
+        let file = dir.join("stack.session");
+        std::fs::write(&file, include_str!("../tests/fixtures/stack.session"))?;
+        let path = file.to_str().ok_or("path")?;
+        let added = add_evidence(store, EvidenceKind::Session, path).map_err(|r| r.to_string())?;
+        named(store, &added)
+    }
+
+    /// What the fingerprint tool prints for the fixture session, written out here so
+    /// the replies below do not move with the rule set.
+    fn fingerprinted(
+        store: &Store,
+        session: &EvidenceId,
+    ) -> Result<EvidenceId, Box<dyn std::error::Error>> {
+        let record = Session::read(&store.evidence(session)?.ok_or("no session")?)?;
+        let sent: Vec<&str> = (record.exchanges().iter())
+            .map(|s| s.exchange.as_str())
+            .collect();
+        let (page, script, cart) = (sent[0], sent[1], sent[2]);
+        let printed = rmcp::serde_json::json!({"hosts": {
+            "shop.example": {
+                "Cloudflare": {"categories": ["CDN"], "exchanges": [page]},
+                "Cloudflare Bot Management": {"categories": ["Security"], "exchanges": [page]},
+                "Next.js": {"versions": ["14.2.3"], "categories": ["JavaScript frameworks", "Web frameworks"], "exchanges": [page]},
+                "Nginx": {"versions": ["1.25.3"], "categories": ["Reverse proxies", "Web servers"], "exchanges": [page, script]},
+                "jQuery": {"versions": ["3.6.0"], "categories": ["JavaScript libraries"], "exchanges": [page]},
+            },
+            "api.shop.example": {
+                "Express": {"categories": ["Web frameworks", "Web servers"], "exchanges": [cart]},
+                "Varnish": {"versions": ["7.4"], "categories": ["Caching"], "exchanges": [cart]},
+            },
+        }});
+        let tool = ledger_core::ToolRef {
+            id: "fingerprint".into(),
+            version: "1, wappalyzergo v0.3.11".into(),
+        };
+        let printed = printed.to_string();
+        let facts = runner::record(
+            store,
+            &FINGERPRINT,
+            tool,
+            [session.clone()].into(),
+            printed.as_bytes(),
+        );
+        Ok(facts.map_err(|r| r.to_string())?)
+    }
+
+    #[test]
+    fn the_fingerprint_playbook_applies_until_a_fingerprint_run_reads_the_session() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let listed = || {
+            let listed = ask(&store, About::Playbooks, None, None, None);
+            listed.map_err(|r| r.to_string())
+        };
+        assert!(!listed()?.contains("fingerprint-the-stack"));
+        let session = stack(&store, dir.path())?;
+        let after_import = listed()?;
+        assert!(
+            after_import.contains("\nfingerprint-the-stack  2. Fingerprint the stack: "),
+            "{after_import}"
+        );
+        fingerprinted(&store, &session)?;
+        let after_facts = listed()?;
+        assert!(
+            !after_facts.contains("fingerprint-the-stack"),
+            "{after_facts}"
+        );
+        let text = ask(
+            &store,
+            About::Playbooks,
+            None,
+            Some("fingerprint-the-stack"),
+            None,
+        );
+        let text = text.map_err(|r| r.to_string())?;
+        assert!(text.ends_with(include_str!(
+            "../../../playbooks/web/2-fingerprint-the-stack.md"
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn technology_facts_read_as_a_line_per_host_and_check_technology_claims() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let session = stack(&store, dir.path())?;
+        let facts = fingerprinted(&store, &session)?;
+        let mut log = String::new();
+        let mut say = |what: &str, result: Result<String, Rejection>| {
+            let text = result.unwrap_or_else(|r| format!("REJECTED {r}"));
+            let _ = write!(log, "{what}\n{text}\n\n");
+            text
+        };
+        say("add_evidence tool=fingerprint", made(&store, &facts));
+        let uses = |technology: &str, version: Option<&str>| Claim {
+            kind: ClaimKind::UsesTechnology(ledger_core::UsesTechnology {
+                host: "shop.example".into(),
+                technology: technology.into(),
+                version: version.map(Into::into),
+            }),
+            premises: BTreeSet::new(),
+        };
+        let cite = [short(facts.as_str()).to_owned()];
+        let held = say(
+            "propose: shop.example runs Nginx 1.25.3",
+            propose(&store, uses("Nginx", Some("1.25.3")), &cite),
+        );
+        say(
+            "propose: shop.example runs Nginx 1.24.0",
+            propose(&store, uses("Nginx", Some("1.24.0")), &cite),
+        );
+        say(
+            "propose: shop.example runs Express",
+            propose(&store, uses("Express", None), &cite),
+        );
+        say("explain: Nginx 1.25.3", explain(&store, id_in(&held)));
+        let written = dir.path().join("facts.json");
+        std::fs::write(
+            &written,
+            store.evidence(&facts)?.ok_or("no facts")?.as_ref(),
+        )?;
+        say(
+            "add_evidence kind=technology_facts path=<a facts file>",
+            add_evidence(
+                &store,
+                EvidenceKind::TechnologyFacts,
+                written.to_str().ok_or("path")?,
+            ),
+        );
+        insta::assert_snapshot!("fingerprint", log);
+        Ok(())
+    }
 
     /// The inputs Rizin reads for a file given as `binary_facts`.
     fn for_rizin(

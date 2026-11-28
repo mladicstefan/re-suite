@@ -79,6 +79,14 @@ Every new `ClaimKind` variant needs all four, in the same change:
 - It runs with an empty environment and no stdin, on copies of its inputs in a
   private temporary directory that is its working directory, with a time limit,
   one run at a time per tool.
+- An adapter reads a fixed number of inputs of one kind, or one session
+  (`Reads::Session`): then the evidence of the kind it asks for that the session
+  names (its exchanges, or its scripts' sources) is copied in beside it, each under
+  its id. Only the session is the recorded input: it names the rest by hash. A
+  session that names evidence the ledger lacks is refused before anything starts.
+  Add what a tool reads as a `Reads` case, never as a branch for one tool.
+- A tool's reported version changes whenever its output could. A wrapper of our own
+  says its own version next to its library's (`reading` in `tools/fingerprint`).
 - Every run is confined by `ledger_os::confined`, and the runner has no other way
   to start a program. On Linux that is bubblewrap, found by `LEDGER_TOOL_BWRAP`:
   the tool sees the Nix store read-only, its directory, an empty `/tmp` of 64 MiB,

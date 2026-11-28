@@ -4,7 +4,7 @@ expression: "all.join(\"\\n\")"
 ---
 evidence_unreadable [path]: No such file or directory (os error 2). Next: Check that the path is a local file this server can read.
 evidence_unreadable [path]: No such file or directory (os error 2). Next: Check that the path is a local file this server can read.
-tool_unknown [objdump]: No tool has this id. There are: rizin. Next: Call add_evidence again with one of them.
+tool_unknown [objdump]: No tool has this id. There are: rizin, fingerprint. Next: Call add_evidence again with one of them.
 tool_output_kind [rizin]: Its output is stored as binary_facts. Next: Call add_evidence again with that kind.
 evidence_unknown [0123abcd]: No evidence has this id. Next: Call add_evidence with the capture file first.
 argument_missing [path]: add_evidence needs `path`, or `tool` with `inputs`, and not both. Next: Call add_evidence again with one of them.

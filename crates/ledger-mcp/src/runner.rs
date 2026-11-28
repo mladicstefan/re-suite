@@ -5,7 +5,7 @@
 //! inputs, never sees this server's environment, files or network, and is stopped
 //! when it holds or prints more than its adapter allows.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use ledger_checkers::{MAX_PARSED_EVIDENCE, RIZIN_COMMANDS, rizin_facts};
-use ledger_core::{Event, EvidenceId, EvidenceKind, Ledger, ToolRef};
+use ledger_core::{Event, EvidenceId, EvidenceKind, Session, Technology, TechnologyFacts, ToolRef};
 use ledger_os::TempDir;
 use ledger_store::{Store, StoreError};
 use tokio::io::AsyncReadExt as _;
@@ -25,12 +25,26 @@ use crate::tools::{Rejection, kind_name, reject, unknown_evidence};
 
 const MISSING: &str = "No output was recorded. Tell the human: start this server inside the flake's shell (`nix develop`), which sets the path.";
 const FAILED: &str = "No output was recorded. Check that the input is a file the tool can read, then tell the human.";
+const IMPORT_AGAIN: &str = "No output was recorded. Import the capture file again with add_evidence kind=session, then retry.";
 const UNCONFINED: &str = "No output was recorded. Tell the human: outside tools run only where the server can confine them, so far Linux.";
 
 /// How often a running program's memory is read.
 const WATCH: Duration = Duration::from_millis(20);
 
 const MIB: u64 = 1 << 20;
+
+/// What one run reads. Only the inputs are recorded: anything else it is given, the
+/// inputs name by content hash, so the inputs alone decide the output.
+#[derive(Clone, Copy)]
+enum Reads {
+    /// This many inputs, all of this kind.
+    Inputs(usize, EvidenceKind),
+    /// One session, with every piece of evidence of this kind that it names written
+    /// beside it under its id: its exchanges, or its scripts' sources.
+    Session(EvidenceKind),
+}
+
+type Parse = fn(&ToolRef, &BTreeSet<EvidenceId>, &[u8]) -> Result<Vec<u8>, Rejection>;
 
 /// An outside program, as data: where it is, how to run it, and what of its output to store.
 pub struct Adapter {
@@ -40,9 +54,8 @@ pub struct Adapter {
     env: &'static str,
     /// Arguments that make it print its version on the first line.
     version: &'static [&'static str],
-    /// How many inputs it reads, all of this kind.
-    reads: (usize, EvidenceKind),
-    /// Its arguments, given the absolute path of each input.
+    reads: Reads,
+    /// Its arguments, given the absolute path of each file it reads: the inputs first.
     args: fn(&[PathBuf]) -> Vec<OsString>,
     /// Longest one run may take. The program is stopped when it runs out.
     limit: Duration,
@@ -53,8 +66,8 @@ pub struct Adapter {
     printed: u64,
     /// The kind its output is stored as.
     pub output: EvidenceKind,
-    /// The bytes to store, from what the program printed.
-    parse: fn(&ToolRef, &[u8]) -> Result<Vec<u8>, Rejection>,
+    /// The bytes to store, from what the program printed for these inputs.
+    parse: Parse,
     /// One run at a time, since each can take minutes and much of the memory.
     turn: Semaphore,
     /// The version the program reported, asked once per server run.
@@ -65,7 +78,7 @@ pub static RIZIN: Adapter = Adapter {
     id: "rizin",
     env: "LEDGER_TOOL_RIZIN",
     version: &["-v"],
-    reads: (1, EvidenceKind::Artifact),
+    reads: Reads::Inputs(1, EvidenceKind::Artifact),
     args: rizin_args,
     limit: Duration::from_secs(600),
     memory: 4096 * MIB,
@@ -77,8 +90,25 @@ pub static RIZIN: Adapter = Adapter {
     known: OnceLock::new(),
 };
 
+/// The Wappalyzer rule set (`tools/fingerprint`) on the responses of one session.
+pub static FINGERPRINT: Adapter = Adapter {
+    id: "fingerprint",
+    env: "LEDGER_TOOL_FINGERPRINT",
+    version: &["--version"],
+    reads: Reads::Session(EvidenceKind::HttpExchange),
+    args: fingerprint_args,
+    limit: Duration::from_secs(300),
+    memory: 2048 * MIB,
+    // Names and a few exchange ids per technology; far less than the session it read.
+    printed: 64 * MIB,
+    output: EvidenceKind::TechnologyFacts,
+    parse: fingerprint_output,
+    turn: Semaphore::const_new(1),
+    known: OnceLock::new(),
+};
+
 /// Every outside tool. The next one is an entry here and its output parser.
-static ADAPTERS: [&Adapter; 1] = [&RIZIN];
+static ADAPTERS: [&Adapter; 2] = [&RIZIN, &FINGERPRINT];
 
 /// The sandbox stops the analysis from running commands or writing files.
 fn rizin_args(files: &[PathBuf]) -> Vec<OsString> {
@@ -89,7 +119,11 @@ fn rizin_args(files: &[PathBuf]) -> Vec<OsString> {
 }
 
 /// The functions and direct calls Rizin recovered, as stored `binary_facts`.
-fn rizin_output(tool: &ToolRef, printed: &[u8]) -> Result<Vec<u8>, Rejection> {
+fn rizin_output(
+    tool: &ToolRef,
+    _: &BTreeSet<EvidenceId>,
+    printed: &[u8],
+) -> Result<Vec<u8>, Rejection> {
     let ran = format!("{} {}", tool.id, tool.version);
     let facts = rizin_facts(&ran, printed).map_err(|why| {
         reject(
@@ -99,20 +133,85 @@ fn rizin_output(tool: &ToolRef, printed: &[u8]) -> Result<Vec<u8>, Rejection> {
             "No output was recorded. Check that the file is a program Rizin can read, then tell the human.",
         )
     })?;
-    let stored = rmcp::serde_json::to_vec(&facts).map_err(|e| StoreError::Core(e.into()))?;
-    // Every check would refuse facts over the limit, so they are not stored either.
+    checkable(tool, &facts)
+}
+
+/// Facts as stored, if a check can read them: every check refuses facts over the
+/// limit, so they are not stored either.
+fn checkable(tool: &ToolRef, facts: &impl rmcp::serde::Serialize) -> Result<Vec<u8>, Rejection> {
+    let stored = rmcp::serde_json::to_vec(facts).map_err(|e| StoreError::Core(e.into()))?;
     if stored.len() > MAX_PARSED_EVIDENCE {
         return Err(reject(
             "evidence_too_large",
             tool.id.as_str(),
             format!(
-                "What Rizin recovered is {} bytes, limit {MAX_PARSED_EVIDENCE}.",
+                "What it found is {} bytes, limit {MAX_PARSED_EVIDENCE}.",
                 stored.len()
             ),
-            "No output was recorded. Tell the human: this program is too large to check claims on.",
+            "No output was recorded. Tell the human: this input is too large to check claims on.",
         ));
     }
     Ok(stored)
+}
+
+/// The session's record; the tool finds its exchanges beside it, each named by its id.
+fn fingerprint_args(files: &[PathBuf]) -> Vec<OsString> {
+    let listed = [
+        "--listed".into(),
+        TechnologyFacts::LISTED.to_string().into(),
+    ];
+    let session = files.first().map(|file| file.clone().into_os_string());
+    listed.into_iter().chain(session).collect()
+}
+
+/// What `ledger-fingerprint` prints: by host, the technologies by name.
+#[derive(rmcp::serde::Deserialize)]
+#[serde(crate = "rmcp::serde")]
+struct Fingerprinted {
+    hosts: BTreeMap<String, BTreeMap<String, Technology>>,
+}
+
+/// What the rules read in the session's responses, as stored `technology_facts`.
+fn fingerprint_output(
+    tool: &ToolRef,
+    inputs: &BTreeSet<EvidenceId>,
+    printed: &[u8],
+) -> Result<Vec<u8>, Rejection> {
+    let unusable = |why: String| {
+        reject(
+            "tool_output_unreadable",
+            tool.id.as_str(),
+            format!("The fingerprint tool's output cannot be used: {why}."),
+            FAILED,
+        )
+    };
+    let session = inputs.first().cloned();
+    let session = session.ok_or_else(|| unusable("it read no session".into()))?;
+    let printed: Fingerprinted =
+        rmcp::serde_json::from_slice(printed).map_err(|e| unusable(e.to_string()))?;
+    let mut hosts = printed.hosts;
+    for technology in hosts.values_mut().flat_map(BTreeMap::values_mut) {
+        let listed = std::mem::take(&mut technology.exchanges);
+        technology.exchanges = listed.into_iter().take(TechnologyFacts::LISTED).collect();
+    }
+    if hosts
+        .keys()
+        .chain(hosts.values().flat_map(BTreeMap::keys))
+        .any(String::is_empty)
+    {
+        return Err(unusable(
+            "it names a host or a technology with no name".into(),
+        ));
+    }
+    let tool_ran = format!("{} {}", tool.id, tool.version);
+    checkable(
+        tool,
+        &TechnologyFacts {
+            tool: tool_ran,
+            session,
+            hosts,
+        },
+    )
 }
 
 /// The adapter agents call `id`.
@@ -154,7 +253,10 @@ async fn derive_with(
     program: Option<OsString>,
     inputs: BTreeSet<EvidenceId>,
 ) -> Result<EvidenceId, Rejection> {
-    readable(&store.snapshot().ledger, adapter, &inputs)?;
+    // What the run would read is known before anything starts: a session that names
+    // evidence the ledger lacks is refused here.
+    let (from, read) = (Arc::clone(&store), inputs.clone());
+    let files = off_executor(move || readable(&from, adapter, &read)).await?;
     let program = located(adapter, program)?;
     let version = version(adapter, &program).await?;
     let tool = ToolRef {
@@ -177,11 +279,11 @@ async fn derive_with(
     if let Some(output) = ran_before(&store) {
         return Ok(output);
     }
-    let (into, read) = (Arc::clone(&store), inputs.clone());
+    let into = Arc::clone(&store);
     let (dir, command) = off_executor(move || {
-        let (dir, root, files) = materialised(&into, &read)?;
+        let (dir, root, paths) = materialised(&into, &files)?;
         let mut command = confined(adapter.id, &program, Some(&root))?;
-        command.args((adapter.args)(&files));
+        command.args((adapter.args)(&paths));
         Ok((dir, command))
     })
     .await?;
@@ -194,23 +296,51 @@ async fn derive_with(
     .await
 }
 
-/// Refuses inputs the tool does not read: too many, too few, or of another kind.
+/// What one run is given, inputs first and then, for a session, the evidence it names
+/// that the tool reads. Refuses inputs the tool does not read, and a session that names
+/// evidence this ledger does not hold.
 fn readable(
-    ledger: &Ledger,
+    store: &Store,
     adapter: &Adapter,
     inputs: &BTreeSet<EvidenceId>,
-) -> Result<(), Rejection> {
-    let (count, kind) = adapter.reads;
-    let of_kind = |e: &EvidenceId| ledger.evidence_kind(e) == Some(kind);
-    if inputs.len() == count && inputs.iter().all(of_kind) {
-        return Ok(());
+) -> Result<Vec<EvidenceId>, Rejection> {
+    let (count, kind, beside) = match adapter.reads {
+        Reads::Inputs(count, kind) => (count, kind, None),
+        Reads::Session(beside) => (1, EvidenceKind::Session, Some(beside)),
+    };
+    let held = |e: &EvidenceId, kind| store.snapshot().ledger.evidence_kind(e) == Some(kind);
+    if inputs.len() != count || !inputs.iter().all(|e| held(e, kind)) {
+        return Err(reject(
+            "tool_inputs_wrong",
+            adapter.id,
+            format!("It reads {count} input of kind {}.", kind_name(kind)),
+            "No output was recorded. Add the input with add_evidence first, then name its id in `inputs`.",
+        ));
     }
-    Err(reject(
-        "tool_inputs_wrong",
-        adapter.id,
-        format!("It reads {count} input of kind {}.", kind_name(kind)),
-        "No output was recorded. Add the input with add_evidence first, then name its id in `inputs`.",
-    ))
+    let mut files: Vec<EvidenceId> = inputs.iter().cloned().collect();
+    let Some(beside) = beside else {
+        return Ok(files);
+    };
+    let mut seen = inputs.clone();
+    for input in inputs {
+        let record = store.evidence(input)?;
+        let record = record.ok_or_else(|| unknown_evidence(input.as_str()))?;
+        let session = Session::read(&record)
+            .map_err(|why| reject("evidence_malformed", input, format!("{why}."), IMPORT_AGAIN))?;
+        for (id, kind) in session.named().filter(|(_, kind)| *kind == beside) {
+            if !held(id, kind) {
+                let message = format!(
+                    "The session names it as {}, and this ledger does not hold it.",
+                    kind_name(kind)
+                );
+                return Err(reject("tool_inputs_wrong", id, message, IMPORT_AGAIN));
+            }
+            if seen.insert(id.clone()) {
+                files.push(id.clone());
+            }
+        }
+    }
+    Ok(files)
 }
 
 fn located(adapter: &Adapter, program: Option<OsString>) -> Result<PathBuf, Rejection> {
@@ -358,11 +488,11 @@ async fn over_memory(adapter: &Adapter, pid: u32) -> Rejection {
     }
 }
 
-/// Each input as a file named by its id, in a new directory only this user can open,
-/// with the directory's absolute path.
+/// Each piece of evidence as a file named by its id, in a new directory only this user
+/// can open, with the directory's absolute path.
 fn materialised(
     store: &Store,
-    inputs: &BTreeSet<EvidenceId>,
+    inputs: &[EvidenceId],
 ) -> Result<(TempDir, PathBuf, Vec<PathBuf>), Rejection> {
     let unwritable = |e: std::io::Error| {
         let message = format!("They could not be written for the tool: {e}.");
@@ -394,7 +524,7 @@ pub fn record(
     inputs: BTreeSet<EvidenceId>,
     printed: &[u8],
 ) -> Result<EvidenceId, Rejection> {
-    let output = store.add_evidence(adapter.output, &(adapter.parse)(&tool, printed)?)?;
+    let output = store.add_evidence(adapter.output, &(adapter.parse)(&tool, &inputs, printed)?)?;
     tracing::info!(tool = adapter.id, version = %tool.version, %output, "ran");
     store.append(Event::Derived {
         tool,
@@ -461,7 +591,11 @@ mod tests {
         clippy::unnecessary_wraps,
         reason = "an adapter's parser has to be able to refuse"
     )]
-    fn as_printed(_: &ToolRef, printed: &[u8]) -> Result<Vec<u8>, Rejection> {
+    fn as_printed(
+        _: &ToolRef,
+        _: &BTreeSet<EvidenceId>,
+        printed: &[u8],
+    ) -> Result<Vec<u8>, Rejection> {
         Ok(printed.to_vec())
     }
 
@@ -471,7 +605,7 @@ mod tests {
             id: "fake",
             env: "LEDGER_TOOL_FAKE",
             version: &["-c", "echo fake 1.2"],
-            reads: (1, EvidenceKind::Artifact),
+            reads: Reads::Inputs(1, EvidenceKind::Artifact),
             args,
             limit,
             memory: 1024 * MIB,
@@ -626,5 +760,150 @@ mod tests {
             adapter("objdump").err().map(|r| r.code),
             Some("tool_unknown")
         );
+    }
+
+    /// A session written by hand: two hosts with the markers the rules look for.
+    const STACK: &str = include_str!("../tests/fixtures/stack.session");
+
+    /// A ledger holding the fixture session, imported as an agent imports one, and
+    /// the session's id.
+    fn with_session(dir: &Path) -> Result<(Arc<Store>, EvidenceId), Box<dyn std::error::Error>> {
+        let store = Store::open(dir.join("l.db"))?;
+        let file = dir.join("stack.session");
+        std::fs::write(&file, STACK)?;
+        let path = file.to_str().ok_or("path")?;
+        crate::tools::add_evidence(&store, EvidenceKind::Session, path)
+            .map_err(|r| r.to_string())?;
+        let ledger = &store.snapshot().ledger;
+        let session = ledger.evidence_of(EvidenceKind::Session).next().cloned();
+        Ok((Arc::new(store), session.ok_or("no session")?))
+    }
+
+    #[tokio::test]
+    async fn the_rules_read_a_session_once_and_say_what_each_host_runs() -> TestResult {
+        let program = std::env::var_os(FINGERPRINT.env);
+        let dir = tempfile::tempdir()?;
+        let (store, session) = with_session(dir.path())?;
+        let inputs = BTreeSet::from([session.clone()]);
+        let ran = derive_with(
+            Arc::clone(&store),
+            &FINGERPRINT,
+            program.clone(),
+            inputs.clone(),
+        );
+        let output = ran.await.map_err(|r| r.to_string())?;
+        let stored = store.evidence(&output)?.ok_or("not stored")?;
+        let facts: TechnologyFacts = rmcp::serde_json::from_slice(&stored)?;
+        assert_eq!(facts.session, session);
+        assert!(
+            facts.tool.starts_with("fingerprint 1, wappalyzergo v"),
+            "{}",
+            facts.tool
+        );
+        let on = |host: &str, name: &str| {
+            let found = facts.hosts.get(host).and_then(|found| found.get(name));
+            found.map(|t| t.named(name))
+        };
+        let shop = "shop.example";
+        assert_eq!(on(shop, "Nginx").as_deref(), Some("Nginx 1.25.3"));
+        assert_eq!(on(shop, "Next.js").as_deref(), Some("Next.js 14.2.3"));
+        assert_eq!(on(shop, "jQuery").as_deref(), Some("jQuery 3.6.0"));
+        assert_eq!(on(shop, "Cloudflare").as_deref(), Some("Cloudflare"));
+        let wall = facts.hosts[shop]
+            .get("Cloudflare Bot Management")
+            .ok_or("no wall")?;
+        assert!(wall.categories.contains("Security"), "{wall:?}");
+        // A script's body is not a page, so markup quoted in it is not read.
+        assert_eq!(on(shop, "Nuxt.js"), None);
+        let api = "api.shop.example";
+        assert_eq!(on(api, "Express").as_deref(), Some("Express"));
+        assert_eq!(on(api, "Varnish").as_deref(), Some("Varnish 7.4"));
+        assert_eq!(on(api, "Nginx"), None);
+        // The server answered on both of the shop's exchanges.
+        let ledger = &store.snapshot().ledger;
+        let record = Session::read(&store.evidence(&session)?.ok_or("no session")?)?;
+        let sent: Vec<&EvidenceId> = record.exchanges().iter().map(|s| &s.exchange).collect();
+        let nginx = &facts.hosts[shop]["Nginx"].exchanges;
+        assert_eq!(nginx, &BTreeSet::from([sent[0].clone(), sent[1].clone()]));
+        let tool = ToolRef {
+            id: FINGERPRINT.id.into(),
+            version: FINGERPRINT.known.get().ok_or("no version")?.clone(),
+        };
+        assert_eq!(ledger.derivation_of(&output), Some((&tool, &inputs)));
+        // The second call finds the run made: a process started now would fail.
+        let seq = store.snapshot().seq;
+        let nowhere = Some("/no/such/program".into());
+        let again = derive_with(Arc::clone(&store), &FINGERPRINT, nowhere, inputs.clone());
+        assert_eq!(again.await.map_err(|r| r.to_string())?, output);
+        assert_eq!(store.snapshot().seq, seq, "the cached run logged an event");
+        // Another ledger with the same session gets the same bytes.
+        let elsewhere = tempfile::tempdir()?;
+        let (other, _) = with_session(elsewhere.path())?;
+        let there = derive_with(other, &FINGERPRINT, program, inputs).await;
+        assert_eq!(there.map_err(|r| r.to_string())?, output);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_session_that_names_an_exchange_the_ledger_lacks_is_refused_before_a_run()
+    -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Arc::new(Store::open(dir.path().join("l.db"))?);
+        // The record and its script, and all but the last exchange.
+        let captured = Session::from_capture(STACK.as_bytes())?;
+        let (last, rest) = captured.exchanges.split_last().ok_or("no exchange")?;
+        for exchange in rest {
+            store.add_evidence(EvidenceKind::HttpExchange, exchange)?;
+        }
+        store.add_evidence(EvidenceKind::Artifact, &captured.sources[0])?;
+        let session = store.add_evidence(EvidenceKind::Session, &captured.record)?;
+        let seq = store.snapshot().seq;
+        // Had anything been started, this path would make it `tool_missing`.
+        let nowhere = Some("/no/such/program".into());
+        let ran = derive_with(Arc::clone(&store), &FINGERPRINT, nowhere, [session].into()).await;
+        let refused = ran.err().ok_or("not refused")?;
+        assert_eq!(
+            (refused.code, refused.subject.as_str()),
+            ("tool_inputs_wrong", &EvidenceId::of(last).as_str()[..12])
+        );
+        assert_eq!(store.snapshot().seq, seq, "a refused run was recorded");
+        Ok(())
+    }
+
+    #[test]
+    fn what_the_tool_prints_is_kept_within_its_limits_or_refused() -> TestResult {
+        let tool = ToolRef {
+            id: "fingerprint".into(),
+            version: "1, wappalyzergo v0".into(),
+        };
+        let session = BTreeSet::from([EvidenceId::of(b"session")]);
+        let ids: Vec<String> = (0..20).map(|n| EvidenceId::of(&[n]).to_string()).collect();
+        let printed = rmcp::serde_json::json!({"hosts": {"shop.example": {"Nginx": {"versions": ["1.25.3"], "categories": ["Web servers"], "exchanges": ids}}}});
+        let stored = fingerprint_output(&tool, &session, printed.to_string().as_bytes());
+        let facts: TechnologyFacts =
+            rmcp::serde_json::from_slice(&stored.map_err(|r| r.to_string())?)?;
+        let nginx = &facts.hosts["shop.example"]["Nginx"];
+        assert_eq!(nginx.exchanges.len(), TechnologyFacts::LISTED);
+        assert_eq!(facts.tool, "fingerprint 1, wappalyzergo v0");
+        let refused = |printed: &str| {
+            fingerprint_output(&tool, &session, printed.as_bytes())
+                .err()
+                .map(|r| r.code)
+        };
+        assert_eq!(refused("not json"), Some("tool_output_unreadable"));
+        assert_eq!(
+            refused(r#"{"hosts": {"": {}}}"#),
+            Some("tool_output_unreadable")
+        );
+        assert_eq!(
+            refused(r#"{"hosts": {"a.example": {"": {}}}}"#),
+            Some("tool_output_unreadable")
+        );
+        let args = fingerprint_args(&[
+            PathBuf::from("/tmp/ledger-x/session"),
+            PathBuf::from("/tmp/ledger-x/exchange"),
+        ]);
+        assert_eq!(args, ["--listed", "8", "/tmp/ledger-x/session"]);
+        Ok(())
     }
 }

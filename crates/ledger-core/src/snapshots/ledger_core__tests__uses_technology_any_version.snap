@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/lib.rs
+expression: "uses(\"127.0.0.1:8080\", \"Express\", None).sentence()"
+---
+In the responses saved from `127.0.0.1:8080`, the Wappalyzer rules find Express (what the rules read, not proof of what runs).

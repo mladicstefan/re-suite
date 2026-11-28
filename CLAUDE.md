@@ -16,6 +16,7 @@ target; all checks replay captures.
 - `crates/ledger-mcp`: stdio MCP server (propose, ask, explain, add_evidence, retract). Only crate with tokio.
   Its `runner` module is the one place that starts outside programs, each found by the absolute path in `LEDGER_TOOL_<ID>`,
   confined by `ledger_os::confined`, and stopped past its adapter's time, memory or output limit.
+  An adapter reads inputs of one kind, or one session with the evidence it names written beside it (`fingerprint`).
 - `crates/ledger-cli`: prints claims with status from a ledger file. `ledger-capture` takes what only a person may capture: `memory` of a running process, a `web` session in Chromium. Its second binary, `ledger-capture`, is how a person takes a live capture.
 - `playbooks/`: what an agent does in each situation, one file each. `ask about=playbooks` serves the ones that apply, from the table in `crates/ledger-mcp/src/playbooks.rs`.
 - `crates/ledger-bench`: `cargo run --release -p ledger-bench` checks the ROADMAP.md budgets.
@@ -25,6 +26,7 @@ target; all checks replay captures.
   Run anything that needs one with `nix develop -c <command>`. Never install a tool on the machine; add it to the flake.
   npm tools are pinned in `tools/js`: add one with `npm install --package-lock-only --save-exact --ignore-scripts <name>` there.
   `tools/fingerprint` is a Go wrapper; after changing its dependencies, refresh `vendorHash` in the flake.
+  Bump its `reading` constant whenever what it reads or prints changes: the ledger reuses a run at the same version.
 - Full CI: `scripts/ci.sh` (fmt, clippy -D warnings, clippy of ledger-os for Windows and macOS, nextest, doctests, cargo deny, cargo machete, uv lock check).
   It enters the flake's shell itself. Tests that start a confined tool need the flake's variables
   (`LEDGER_TOOL_*`, `LEDGER_TEST_SH`), so run cargo inside `nix develop` too.

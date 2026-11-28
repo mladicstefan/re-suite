@@ -2,10 +2,12 @@
 //! to what the ledger holds, and carries the playbook's file from `playbooks/`. The
 //! next playbook is one row here and one file there.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use ledger_core::{EvidenceKind, Ledger};
+use ledger_core::{EvidenceId, EvidenceKind, Ledger};
 
+use crate::runner::FINGERPRINT;
 use crate::tools::{Rejection, reject};
 
 struct Playbook {
@@ -19,16 +21,39 @@ struct Playbook {
     text: &'static str,
 }
 
-static PLAYBOOKS: [Playbook; 1] = [Playbook {
-    id: "capture-a-session",
-    title: "1. Capture a session",
-    applies: holds_no_session,
-    why: "the ledger holds no browser session, and every other web playbook reads one",
-    text: include_str!("../../../playbooks/web/1-capture-a-session.md"),
-}];
+static PLAYBOOKS: [Playbook; 2] = [
+    Playbook {
+        id: "capture-a-session",
+        title: "1. Capture a session",
+        applies: holds_no_session,
+        why: "the ledger holds no browser session, and every other web playbook reads one",
+        text: include_str!("../../../playbooks/web/1-capture-a-session.md"),
+    },
+    Playbook {
+        id: "fingerprint-the-stack",
+        title: "2. Fingerprint the stack",
+        applies: holds_an_unread_session,
+        why: "the ledger holds a session that no fingerprint run has read",
+        text: include_str!("../../../playbooks/web/2-fingerprint-the-stack.md"),
+    },
+];
 
 fn holds_no_session(ledger: &Ledger) -> bool {
     ledger.evidence_of(EvidenceKind::Session).next().is_none()
+}
+
+fn holds_an_unread_session(ledger: &Ledger) -> bool {
+    let fingerprinted = |facts| {
+        let run = ledger.derivation_of(facts);
+        run.filter(|(tool, _)| tool.id == FINGERPRINT.id)
+    };
+    let read: BTreeSet<&EvidenceId> = (ledger.evidence_of(EvidenceKind::TechnologyFacts))
+        .filter_map(fingerprinted)
+        .flat_map(|(_, inputs)| inputs)
+        .collect();
+    ledger
+        .evidence_of(EvidenceKind::Session)
+        .any(|session| !read.contains(session))
 }
 
 /// The playbooks that apply to what `ledger` holds, one line each, or the text of

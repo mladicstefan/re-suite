@@ -11,7 +11,7 @@ use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{EvidenceId, HttpExchange, ToolRef, url_host_and_path};
+use crate::{EvidenceId, EvidenceKind, HttpExchange, ToolRef, url_host_and_path};
 
 /// An address as the browser reported it, such as a URL. Never empty.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -190,6 +190,15 @@ impl Session {
     #[must_use]
     pub const fn scripts(&self) -> &BTreeSet<Script> {
         &self.scripts
+    }
+
+    /// Every piece of evidence the record names, with the kind it is stored as: each
+    /// exchange as `http_exchange`, each script's source as `artifact`.
+    pub fn named(&self) -> impl Iterator<Item = (&EvidenceId, EvidenceKind)> {
+        let exchanges =
+            (self.exchanges.iter()).map(|sent| (&sent.exchange, EvidenceKind::HttpExchange));
+        let sources = (self.scripts.iter()).map(|script| (&script.source, EvidenceKind::Artifact));
+        exchanges.chain(sources)
     }
 
     /// A stored record.
