@@ -78,7 +78,7 @@
             pkgs.uv
             # Second readings for the trial scripts. objdump and readelf come with the shell's compiler.
             pkgs.llvm
-            # docs/trials/real-sites.capture.mjs
+            # `ledger-capture web` finds Chromium by LEDGER_TOOL_CHROMIUM below; Node runs the trial scripts.
             pkgs.nodejs
             pkgs.chromium
             # What the web playbooks run on captured traffic and scripts.
@@ -92,9 +92,11 @@
           ];
           # ledger-mcp starts an outside program only by the absolute path in its
           # LEDGER_TOOL_<ID> variable, one per adapter in crates/ledger-mcp/src/runner.rs,
-          # and never looks on PATH. The next adapter's variable goes here, for example
+          # and never looks on PATH; nor does `ledger-capture web` for the browser. The
+          # next adapter's variable goes here, for example
           # LEDGER_TOOL_WAKARU = "${jsTools}/bin/wakaru";
           LEDGER_TOOL_RIZIN = "${pkgs.rizin}/bin/rizin";
+          LEDGER_TOOL_CHROMIUM = "${pkgs.chromium}/bin/chromium";
         };
     in
     {

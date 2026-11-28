@@ -12,6 +12,9 @@ ledger-checkers = { version = "0.1.0", path = "../ledger-checkers" }
 ledger-core = { version = "0.1.0", path = "../ledger-core" }
 ledger-os = { version = "0.1.0", path = "../ledger-os" }
 ledger-store = { version = "0.1.0", path = "../ledger-store" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tungstenite = "0.30.0"
 
 [lints]
 workspace = true

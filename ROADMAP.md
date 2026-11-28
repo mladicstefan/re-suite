@@ -449,7 +449,8 @@ The playbooks:
       Chromium is driven over the DevTools Protocol with its cache off;
       mitmproxy serves clients that are not browsers. The result is a
       session: exchanges in order, the script and line that started each,
-      and every script's source
+      and every script's source.
+      Built: `ledger-capture web` and `session` evidence, tested on loopback; not yet mitmproxy or a real capture
 - [ ] **2. Fingerprint the stack.** Offline, on a session: frameworks,
       servers, CDNs and bot walls from headers, cookies, HTML and script
       addresses, and libraries with versions from script contents. A

@@ -1,8 +1,12 @@
-//! Reads memory from a running process and writes it, with what the person saw
-//! on screen at that moment, as a file the ledger takes as `live_snapshot` evidence.
+//! Captures what a person approves, as a file the ledger takes as evidence: memory of a
+//! running process with what they saw on screen (`memory`), or a browser session on
+//! hosts they name (`web`).
 //!
-//! Only a person at a terminal can take a capture: the tool asks them to type the
-//! process's name before it reads anything. The server and its agents cannot.
+//! Only a person at a terminal can take a capture: the tool asks them to type a name
+//! before it reads or sends anything. The server and its agents cannot.
+
+mod browser;
+mod web;
 
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, IsTerminal as _};
@@ -13,10 +17,16 @@ use clap::Parser;
 use ledger_core::{Capture, Observed};
 
 #[derive(Parser)]
-#[command(
-    about = "Capture memory of a running process, with what you see on screen at that moment"
-)]
-struct Args {
+#[command(about = "Capture what you approve, as evidence for the ledger")]
+enum Command {
+    /// Read memory from a running process, with what you see on screen at that moment.
+    Memory(MemoryArgs),
+    /// Load pages in Chromium, sending requests only to hosts you approve, and keep the session.
+    Web(web::Args),
+}
+
+#[derive(clap::Args)]
+struct MemoryArgs {
     /// The process to read. It is only read, never stopped or changed.
     #[arg(long)]
     pid: u32,
@@ -58,13 +68,32 @@ fn seen(text: &str) -> Result<(String, Observed), String> {
     }
 }
 
+/// The one question every capture asks: the person types `expected` to go ahead.
+/// `answer` is `None` when nobody is at a terminal to be asked; `nothing` says what
+/// was then not done.
+fn gate(
+    answer: Option<impl FnOnce(&str) -> std::io::Result<String>>,
+    question: &str,
+    expected: &str,
+    named: &str,
+    nothing: &str,
+) -> anyhow::Result<()> {
+    let Some(answer) = answer else {
+        bail!("a live capture is taken by a person at a terminal, and this is not one; {nothing}");
+    };
+    ensure!(
+        answer(question)?.trim() == expected,
+        "that is not {named}; {nothing}"
+    );
+    Ok(())
+}
+
 /// Takes the capture once `answer` gives the process's name, and returns what to tell the person.
-/// `answer` is `None` when nobody is at a terminal to be asked.
 fn capture(
-    args: &Args,
+    args: &MemoryArgs,
     answer: Option<impl FnOnce(&str) -> std::io::Result<String>>,
 ) -> anyhow::Result<String> {
-    let Args {
+    let MemoryArgs {
         pid, address, len, ..
     } = *args;
     ensure!(
@@ -78,19 +107,17 @@ fn capture(
         args.out.display()
     );
     let process = ledger_os::process_name(pid).with_context(|| format!("process {pid}"))?;
-    let Some(answer) = answer else {
-        bail!(
-            "a live capture is taken by a person at a terminal, and this is not one; nothing was read"
-        );
-    };
     let question = format!(
         "About to read {len} bytes at {address:#x} from process {pid} (`{process}`). It is only read.\n\
          Type the process's name to go ahead: "
     );
-    ensure!(
-        answer(&question)?.trim() == process,
-        "that is not the process's name; nothing was read"
-    );
+    gate(
+        answer,
+        &question,
+        &process,
+        "the process's name",
+        "nothing was read",
+    )?;
     let memory = ledger_os::read_memory(pid, address, len)
         .with_context(|| format!("reading {len} bytes at {address:#x} from process {pid}"))?;
     let observed: BTreeMap<String, Observed> = args.seen.iter().cloned().collect();
@@ -116,7 +143,7 @@ fn capture(
 }
 
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let command = Command::parse();
     let ask = |question: &str| {
         eprint!("{question}");
         let mut line = String::new();
@@ -124,7 +151,16 @@ fn main() -> anyhow::Result<()> {
         Ok(line)
     };
     let at_terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    println!("{}", capture(&args, at_terminal.then_some(ask))?);
+    let told = match command {
+        Command::Memory(args) => capture(&args, at_terminal.then_some(ask))?,
+        // Nothing is looked up on PATH: the flake's shell names Chromium by its store path.
+        Command::Web(args) => web::capture(
+            &args,
+            at_terminal.then_some(ask),
+            std::env::var_os(web::CHROMIUM),
+        )?,
+    };
+    println!("{told}");
     Ok(())
 }
 
@@ -158,7 +194,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         // The process read is this test itself, at a buffer it holds.
         let known = std::hint::black_box(73u32.to_le_bytes());
-        let args = |out: &str| Args {
+        let args = |out: &str| MemoryArgs {
             pid: std::process::id(),
             address: known.as_ptr().addr() as u64,
             len: known.len(),
@@ -206,7 +242,7 @@ mod tests {
             Some(|_: &str| Ok(name.clone())),
         ));
         assert!(again.contains("exists already"), "{again}");
-        let huge = Args {
+        let huge = MemoryArgs {
             len: Capture::MAX_MEMORY + 1,
             ..args("b.capture")
         };

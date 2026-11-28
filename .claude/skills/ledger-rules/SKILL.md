@@ -70,7 +70,8 @@ Every new `ClaimKind` variant needs all four, in the same change:
 
 ## Outside tools run in one place
 - Only `ledger-mcp`'s `runner` module starts a process. Checkers, the store and
-  the CLI never do; a checker reads what a tool printed from stored evidence.
+  the CLI never do; a checker reads what a tool printed from stored evidence. The
+  one exception is `ledger-capture web`, which starts Chromium for a person (below).
 - A tool is one entry in `runner::ADAPTERS` and its output parser. Adding one
   changes nothing else but the flake.
 - A program is found only by the absolute path in `LEDGER_TOOL_<ID>`, which
@@ -90,6 +91,15 @@ Every new `ClaimKind` variant needs all four, in the same change:
   not have (`script`, a pty) to get past the question.
 - What the person saw travels in the capture's first line, so it is under the
   evidence's hash. A layout field named like a seen value must read as it.
+- A browser session is captured by `ledger-capture web` only, for a person at a
+  terminal who names the hosts with `--host` and types the first one; `memory` and
+  `web` share one gate. Chromium is found by `LEDGER_TOOL_CHROMIUM`, gets a new
+  profile and the cache off, and keeps the person's environment (a window needs
+  their display). A request to any other host is refused before it is sent, by the
+  protocol's fetch interception on every page, and no other host name resolves; the
+  refused hosts are listed in the session, never fetched.
+- A real host's name is given at run time only. Tests serve their own site on
+  loopback, and no file in the repository names a real target.
 
 ## Compile time first
 - Prefer `const` items and `const fn` over values computed at run time, and
