@@ -6,9 +6,7 @@ publish = false
 
 [dependencies]
 memmap2 = "0.9.12"
+tempfile = "3.27.0"
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-tempfile = "3.27.0"

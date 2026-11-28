@@ -68,6 +68,21 @@ Every new `ClaimKind` variant needs all four, in the same change:
 ## Checkers are offline
 - Checkers replay saved evidence only. Never send anything to a live target.
 
+## Outside tools run in one place
+- Only `ledger-mcp`'s `runner` module starts a process. Checkers, the store and
+  the CLI never do; a checker reads what a tool printed from stored evidence.
+- A tool is one entry in `runner::ADAPTERS` and its output parser. Adding one
+  changes nothing else but the flake.
+- A program is found only by the absolute path in `LEDGER_TOOL_<ID>`, which
+  `flake.nix` sets to a store path. Never search PATH, and refuse a relative path.
+- It runs with an empty environment and no stdin, on copies of its inputs in a
+  private temporary directory that is its working directory, with a time limit,
+  one run at a time per tool.
+- What it prints is stored as evidence and logged as `Event::Derived`: the tool,
+  the version it reported, the inputs and the output, all evidence the ledger
+  holds. The same tool, version and inputs never run twice. A file stored as it
+  is, such as a program or a script, is `artifact` evidence.
+
 ## Live captures are a person's
 - Memory of a running process is read by `ledger-capture` only, for a person at a
   terminal who types the process's name. Never read a process from the server, a

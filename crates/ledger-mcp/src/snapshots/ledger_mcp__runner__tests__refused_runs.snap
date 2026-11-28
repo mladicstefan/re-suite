@@ -1,0 +1,11 @@
+---
+source: crates/ledger-mcp/src/runner.rs
+expression: "all.join(\"\\n\")"
+---
+tool_missing [fake]: `LEDGER_TOOL_FAKE` does not hold the program's absolute path. Next: No output was recorded. Tell the human: start this server inside the flake's shell (`nix develop`), which sets the path.
+tool_missing [fake]: `LEDGER_TOOL_FAKE` does not hold the program's absolute path. Next: No output was recorded. Tell the human: start this server inside the flake's shell (`nix develop`), which sets the path.
+tool_missing [fake]: It could not be started: No such file or directory (os error 2). Next: No output was recorded. Tell the human: start this server inside the flake's shell (`nix develop`), which sets the path.
+tool_inputs_wrong [fake]: It reads 1 input of kind artifact. Next: No output was recorded. Add the input with add_evidence first, then name its id in `inputs`.
+tool_inputs_wrong [fake]: It reads 1 input of kind artifact. Next: No output was recorded. Add the input with add_evidence first, then name its id in `inputs`.
+tool_timeout [fake]: It did not finish within 200ms and was stopped. Next: No output was recorded. Tell the human: this input needs a longer limit or a lighter run.
+tool_failed [fake]: It ended with exit status: 3. Next: No output was recorded. Check that the input is a file the tool can read, then tell the human.

@@ -1,7 +1,8 @@
 //! MCP server over stdio. Agents file claims and evidence here; every check replays saved evidence.
-//! Handlers stay thin: parse, hand the blocking work to `tools`, reply.
+//! Handlers stay thin: parse, hand the blocking work to `tools` and outside programs
+//! to `runner`, reply.
 
-mod rizin;
+mod runner;
 mod tools;
 
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::transport::stdio;
 use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
-use tools::{About, Rejection};
+use tools::{About, Rejection, Source};
 
 #[derive(rmcp::serde::Deserialize, JsonSchema)]
 #[serde(crate = "rmcp::serde")]
@@ -52,11 +53,15 @@ struct ExplainArgs {
 #[serde(crate = "rmcp::serde")]
 struct AddEvidenceArgs {
     kind: EvidenceKind,
-    /// Local path of a saved capture or snapshot. For `binary_facts` it is the
-    /// program file itself: the server runs Rizin on it. The program is read, never run.
-    /// For `live_snapshot` it is a file a human made with `ledger-capture`: memory of a
-    /// running process and what they saw then. This server never reads a process.
-    path: String,
+    /// Local path of a saved file. For `binary_facts` it may be the program itself:
+    /// it is stored as `artifact` and Rizin reads it, never runs it. For `live_snapshot`
+    /// it is a file a human made with `ledger-capture`; this server never reads a process.
+    path: Option<String>,
+    /// Instead of `path`: an outside tool, such as `rizin`, to run on `inputs`.
+    tool: Option<String>,
+    /// Ids of the evidence the tool reads.
+    #[serde(default)]
+    inputs: Vec<String>,
 }
 
 #[derive(rmcp::serde::Deserialize, JsonSchema)]
@@ -80,11 +85,11 @@ struct LedgerServer {
 impl LedgerServer {
     /// Store calls, hashing and checks block, so they run off the async executor,
     /// inside one trace span per verb.
-    async fn blocking(
+    async fn blocking<T: Send + 'static>(
         &self,
         verb: &'static str,
-        work: impl FnOnce(&Store) -> Result<String, Rejection> + Send + 'static,
-    ) -> Result<String, ErrorData> {
+        work: impl FnOnce(&Store) -> Result<T, Rejection> + Send + 'static,
+    ) -> Result<T, ErrorData> {
         let store = Arc::clone(&self.store);
         let joined = tokio::task::spawn_blocking(move || {
             let span = tracing::info_span!("verb", verb);
@@ -96,7 +101,7 @@ impl LedgerServer {
             result
         });
         match joined.await {
-            Ok(Ok(text)) => Ok(text),
+            Ok(Ok(done)) => Ok(done),
             Ok(Err(r)) => Err(refused(&r)),
             Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
         }
@@ -149,24 +154,29 @@ impl LedgerServer {
     }
 
     #[tool(
-        description = "Store a saved local capture or snapshot as evidence; returns its id. A program given as binary_facts is analysed with Rizin first, which can take minutes."
+        description = "Store a saved local file as evidence, or what an outside tool prints for stored evidence; returns its id. A tool runs once per version and inputs, and can take minutes. A program given as binary_facts is read by Rizin."
     )]
     async fn add_evidence(
         &self,
         Parameters(args): Parameters<AddEvidenceArgs>,
     ) -> Result<String, ErrorData> {
-        // A program is analysed first, in a child process; every other file is stored as it is.
-        let analysis = if args.kind == EvidenceKind::BinaryFacts {
-            let analysed = rizin::analyse(args.path.clone()).await;
-            analysed.map_err(|r| refused(&r))?
-        } else {
-            None
+        let AddEvidenceArgs {
+            kind,
+            path,
+            tool,
+            inputs,
+        } = args;
+        let source = self.blocking("add_evidence", move |store| {
+            tools::source(store, kind, path.as_deref(), tool.as_deref(), &inputs)
+        });
+        let (adapter, inputs) = match source.await? {
+            Source::Stored(reply) => return Ok(reply),
+            Source::Tool(adapter, inputs) => (adapter, inputs),
         };
-        self.blocking("add_evidence", move |store| match analysis {
-            Some(ran) => tools::add_rizin_output(store, &ran.tool, &ran.output),
-            None => tools::add_evidence(store, args.kind, &args.path),
-        })
-        .await
+        let output = runner::derive(Arc::clone(&self.store), adapter, inputs).await;
+        let output = output.map_err(|r| refused(&r))?;
+        self.blocking("add_evidence", move |store| tools::made(store, &output))
+            .await
     }
 
     #[tool(description = "Withdraw a claim. History is kept; its dependents go on hold.")]

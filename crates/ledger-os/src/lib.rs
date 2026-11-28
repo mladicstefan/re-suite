@@ -138,6 +138,31 @@ pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     sync_dir(parent(dir))
 }
 
+pub use tempfile::TempDir;
+
+/// A new, empty directory in the system's temporary directory that only this user
+/// can open, for the files a child process reads. Dropping it removes it and
+/// everything in it.
+///
+/// # Errors
+/// The directory cannot be created.
+pub fn private_temp_dir() -> io::Result<TempDir> {
+    let mut builder = tempfile::Builder::new();
+    owner_only_temp(builder.prefix("ledger-"));
+    builder.tempdir()
+}
+
+#[cfg(unix)]
+fn owner_only_temp(builder: &mut tempfile::Builder<'_, '_>) {
+    use std::os::unix::fs::PermissionsExt as _;
+    builder.permissions(fs::Permissions::from_mode(0o700));
+}
+
+/// Windows has no file modes; the directory takes the access list of the user's own
+/// temporary directory.
+#[cfg(not(unix))]
+const fn owner_only_temp(_builder: &mut tempfile::Builder<'_, '_>) {}
+
 /// Locks the file `path`, created if it is not there, for as long as the returned
 /// file stays open. `None` if it is locked already, by this process or another.
 ///
@@ -380,6 +405,12 @@ mod tests {
         let mode = |path: &Path| fs::metadata(path).map(|m| m.permissions().mode() & 0o777);
         assert_eq!(mode(&evidence)?, 0o700);
         assert_eq!(mode(&evidence.join("key"))?, 0o600);
+        let work = private_temp_dir()?;
+        let path = work.path().to_path_buf();
+        fs::write(path.join("input"), b"program")?;
+        assert_eq!(mode(&path)?, 0o700);
+        drop(work);
+        assert!(!path.exists(), "a temporary directory was left behind");
         Ok(())
     }
 

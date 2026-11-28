@@ -70,7 +70,7 @@
             pkgs.cargo-nextest
             cargo-deny
             pkgs.cargo-machete
-            # ledger-mcp runs this to read a program.
+            # The trial scripts read programs with it; ledger-mcp finds it by LEDGER_TOOL_RIZIN below.
             pkgs.rizin
             pkgs.kaitai-struct-compiler
             pkgs.gdb
@@ -90,6 +90,11 @@
             pkgs.wabt
             pkgs.wasm-tools
           ];
+          # ledger-mcp starts an outside program only by the absolute path in its
+          # LEDGER_TOOL_<ID> variable, one per adapter in crates/ledger-mcp/src/runner.rs,
+          # and never looks on PATH. The next adapter's variable goes here, for example
+          # LEDGER_TOOL_WAKARU = "${jsTools}/bin/wakaru";
+          LEDGER_TOOL_RIZIN = "${pkgs.rizin}/bin/rizin";
         };
     in
     {

@@ -1078,6 +1078,8 @@ pub enum EvidenceKind {
     /// Memory read from a running process, with what a human saw at that moment:
     /// a [`Capture`] line, then the bytes.
     LiveSnapshot,
+    /// A file as it is, such as a program or a script: what most outside tools read.
+    Artifact,
 }
 
 /// One function an analysis tool recovered.
@@ -1387,6 +1389,15 @@ pub struct CheckerRef {
     pub version: u32,
 }
 
+/// Which outside tool made a piece of evidence: the adapter that ran it, and the
+/// version the program reported. Together with the evidence it read, this
+/// identifies the run: the same three give the same output.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ToolRef {
+    pub id: String,
+    pub version: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
@@ -1423,6 +1434,13 @@ pub enum Event {
     /// checker that has since been fixed stops deciding a claim's status.
     CheckersSet {
         current: BTreeMap<String, u32>,
+    },
+    /// `output` is what `tool` printed when it read `inputs`. All of them are evidence
+    /// the ledger holds already. Recording the same run again changes nothing.
+    Derived {
+        tool: ToolRef,
+        inputs: BTreeSet<EvidenceId>,
+        output: EvidenceId,
     },
 }
 
@@ -1671,6 +1689,10 @@ pub struct Ledger {
     evidence: BTreeMap<EvidenceId, EvidenceKind>,
     /// The checkers whose verdicts count, as the log last listed them.
     checkers: BTreeMap<String, u32>,
+    /// The first run that made each piece of evidence an outside tool printed.
+    made: BTreeMap<EvidenceId, (ToolRef, BTreeSet<EvidenceId>)>,
+    /// What each run printed, by tool and inputs.
+    runs: BTreeMap<ToolRef, BTreeMap<BTreeSet<EvidenceId>, EvidenceId>>,
 }
 
 impl Ledger {
@@ -1703,6 +1725,19 @@ impl Ledger {
                 self.entries[at].retracted = true;
             }
             Event::CheckersSet { current } => self.checkers = current,
+            Event::Derived {
+                tool,
+                inputs,
+                output,
+            } => {
+                let unknown = |e: &&EvidenceId| !self.evidence.contains_key(*e);
+                if let Some(e) = inputs.iter().chain([&output]).find(unknown) {
+                    return Err(CoreError::UnknownEvidence(e.clone()));
+                }
+                let run = (tool.clone(), inputs.clone());
+                self.made.entry(output.clone()).or_insert(run);
+                self.runs.entry(tool).or_default().insert(inputs, output);
+            }
         }
         Ok(())
     }
@@ -1801,6 +1836,25 @@ impl Ledger {
     #[must_use]
     pub fn evidence_kind(&self, id: &EvidenceId) -> Option<EvidenceKind> {
         self.evidence.get(id).copied()
+    }
+
+    /// The evidence a claim's checks read, check by check, oldest first.
+    pub fn evidence_read(&self, id: &ClaimId) -> impl Iterator<Item = &EvidenceId> {
+        let checks = self.entry(id).into_iter().flat_map(|e| &e.checks);
+        checks.flat_map(|(read, _)| read)
+    }
+
+    /// Which outside tool made this evidence, and from what. `None` for evidence that
+    /// was added as it is.
+    #[must_use]
+    pub fn derivation_of(&self, output: &EvidenceId) -> Option<(&ToolRef, &BTreeSet<EvidenceId>)> {
+        self.made.get(output).map(|(tool, inputs)| (tool, inputs))
+    }
+
+    /// What `tool`, at its version, printed for exactly these inputs, if it ran on them.
+    #[must_use]
+    pub fn derived(&self, tool: &ToolRef, inputs: &BTreeSet<EvidenceId>) -> Option<&EvidenceId> {
+        self.runs.get(tool)?.get(inputs)
     }
 
     /// Claim ids that start with `prefix`, in id order, so callers can accept short ids.
@@ -2495,6 +2549,48 @@ mod tests {
             .map(|(_, counts)| counts)
             .collect();
         assert_eq!(counted, [false, true]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_tool_run_names_only_evidence_the_ledger_holds_and_counts_once() -> Result<(), CoreError> {
+        let mut l = Ledger::default();
+        let (program, facts) = (EvidenceId::of(b"program"), EvidenceId::of(b"facts"));
+        let rizin = |version: &str| ToolRef {
+            id: "rizin".into(),
+            version: version.into(),
+        };
+        let inputs: BTreeSet<EvidenceId> = [program.clone()].into();
+        let derived = Event::decode(&Event::encode(&Event::Derived {
+            tool: rizin("0.8.1"),
+            inputs: inputs.clone(),
+            output: facts.clone(),
+        })?)?;
+        let added = |id: &EvidenceId, kind| Event::EvidenceAdded {
+            id: id.clone(),
+            kind,
+        };
+        // Refused while the input, then the output, is evidence the ledger does not hold,
+        // and a refused run leaves no trace.
+        let refused = l.apply(derived.clone());
+        assert!(matches!(refused, Err(CoreError::UnknownEvidence(e)) if e == program));
+        assert_eq!(l, Ledger::default());
+        l.apply(added(&program, EvidenceKind::Artifact))?;
+        let before = l.clone();
+        let refused = l.apply(derived.clone());
+        assert!(matches!(refused, Err(CoreError::UnknownEvidence(e)) if e == facts));
+        assert_eq!(l, before);
+        l.apply(added(&facts, EvidenceKind::BinaryFacts))?;
+        l.apply(derived.clone())?;
+        assert_eq!(l.derived(&rizin("0.8.1"), &inputs), Some(&facts));
+        assert_eq!(l.derivation_of(&facts), Some((&rizin("0.8.1"), &inputs)));
+        // Another version is another run, and evidence added as it is has no maker.
+        assert_eq!(l.derived(&rizin("0.9.0"), &inputs), None);
+        assert_eq!(l.derived(&rizin("0.8.1"), &BTreeSet::new()), None);
+        assert_eq!(l.derivation_of(&program), None);
+        let once = l.clone();
+        l.apply(derived)?;
+        assert_eq!(l, once, "the same run recorded twice changed the ledger");
         Ok(())
     }
 

@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use ledger_checkers::{
     CHECKERS, CheckError, MAX_PARSED_EVIDENCE, check_claim, checker_of, har_exchanges, is_about,
-    rizin_facts,
 };
 use ledger_core::{
     BinaryFacts, Capture, CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event,
@@ -20,6 +19,8 @@ use ledger_core::{
 };
 use ledger_store::{Snapshot, Store, StoreError};
 use schemars::JsonSchema;
+
+use crate::runner::{self, Adapter, RIZIN};
 
 /// Rows per page of any list.
 pub const PAGE: usize = 50;
@@ -60,7 +61,7 @@ impl fmt::Display for Rejection {
     }
 }
 
-fn reject(
+pub fn reject(
     code: &'static str,
     subject: impl fmt::Display,
     message: impl fmt::Display,
@@ -91,19 +92,15 @@ impl From<StoreError> for Rejection {
                 "The stored file no longer matches its hash.",
                 "Add the capture again from its original file and tell the human.",
             ),
-            StoreError::OtherKind(id, kind) => {
-                // The kind as agents write it, `memory_snapshot`, not as the code names it.
-                let kind = rmcp::serde_json::to_value(kind).unwrap_or_default();
-                reject(
-                    "evidence_other_kind",
-                    id,
-                    format!(
-                        "These bytes are already stored as {}, and stored evidence keeps its kind.",
-                        kind.as_str().unwrap_or("another kind")
-                    ),
-                    "Nothing was recorded. Cite the evidence under the kind it has, or tell the human if that kind is wrong.",
-                )
-            }
+            StoreError::OtherKind(id, kind) => reject(
+                "evidence_other_kind",
+                id,
+                format!(
+                    "These bytes are already stored as {}, and stored evidence keeps its kind.",
+                    kind_name(kind)
+                ),
+                "Nothing was recorded. Cite the evidence under the kind it has, or tell the human if that kind is wrong.",
+            ),
             StoreError::Io(e) => reject(
                 "evidence_unreadable",
                 "path",
@@ -173,7 +170,13 @@ fn unknown_claim(text: &str) -> Rejection {
     )
 }
 
-fn unknown_evidence(text: &str) -> Rejection {
+/// An evidence kind as agents write it, `memory_snapshot`, not as the code names it.
+pub fn kind_name(kind: EvidenceKind) -> String {
+    let kind = rmcp::serde_json::to_value(kind).unwrap_or_default();
+    kind.as_str().unwrap_or("another kind").to_owned()
+}
+
+pub fn unknown_evidence(text: &str) -> Rejection {
     reject(
         "evidence_unknown",
         text,
@@ -708,6 +711,14 @@ pub fn explain(store: &Store, claim: &str) -> Result<String, Rejection> {
             out.push_str(" (by an older checker version: does not count)");
         }
     }
+    let read: BTreeSet<&EvidenceId> = ledger.evidence_read(&id).collect();
+    // Evidence an outside tool made, with the run that made it.
+    let derived = read
+        .into_iter()
+        .filter_map(|e| Some((e, derivation(ledger, e)?)));
+    for (evidence, line) in derived.take(LISTED) {
+        let _ = write!(out, "\nevidence {} was {line}", short(evidence.as_str()));
+    }
     let more_premises = claim.premises.len().saturating_sub(LISTED);
     if earlier + more_premises > 0 {
         let _ = write!(
@@ -782,42 +793,111 @@ pub fn recheck(store: &Store, stop: &AtomicBool) -> String {
     )
 }
 
-/// Stores what Rizin printed for a program as the facts it holds: its functions and
-/// direct calls.
+/// Where `add_evidence` gets the bytes it stores.
+pub enum Source {
+    /// Stored already: the reply to give.
+    Stored(String),
+    /// What an outside tool prints when it reads these inputs.
+    Tool(&'static Adapter, BTreeSet<EvidenceId>),
+}
+
+/// What `add_evidence` stores: the file at `path`, or what `tool` prints for `inputs`.
+/// A program given as `binary_facts` is stored as `artifact` evidence, for Rizin to read.
 ///
 /// # Errors
-/// The output is not what the import expects, or it cannot be stored.
-pub fn add_rizin_output(store: &Store, tool: &str, output: &[u8]) -> Result<String, Rejection> {
-    let facts = rizin_facts(tool, output).map_err(|why| {
-        reject(
-            "tool_output_unreadable",
-            "rizin",
-            format!("Rizin's output cannot be used: {why}."),
-            "Nothing was recorded. Check that the file is a program Rizin can read, then tell the human.",
-        )
-    })?;
-    let stored = rmcp::serde_json::to_vec(&facts).map_err(|e| StoreError::Core(e.into()))?;
-    // Every check would refuse facts over the limit, so they are not stored either.
-    if stored.len() > MAX_PARSED_EVIDENCE {
-        return Err(reject(
-            "evidence_too_large",
-            "rizin",
-            format!(
-                "What Rizin recovered is {} bytes, limit {MAX_PARSED_EVIDENCE}.",
-                stored.len()
-            ),
-            "Nothing was recorded. Tell the human: this program is too large to check claims on.",
-        ));
+/// Not exactly one of `path` and `tool` is given, the tool or an input is unknown, the
+/// tool's output is of another kind, or [`add_evidence`] refuses the file.
+pub fn source(
+    store: &Store,
+    kind: EvidenceKind,
+    path: Option<&str>,
+    tool: Option<&str>,
+    inputs: &[String],
+) -> Result<Source, Rejection> {
+    match (path, tool) {
+        (Some(path), None) if kind == EvidenceKind::BinaryFacts && is_program(path)? => {
+            let program = store.add_evidence_file(EvidenceKind::Artifact, path)?;
+            Ok(Source::Tool(&RIZIN, [program].into()))
+        }
+        (Some(path), None) => add_evidence(store, kind, path).map(Source::Stored),
+        (None, Some(tool)) => {
+            let adapter = runner::adapter(tool)?;
+            if adapter.output != kind {
+                let message = format!("Its output is stored as {}.", kind_name(adapter.output));
+                let next = "Call add_evidence again with that kind.";
+                return Err(reject("tool_output_kind", tool, message, next));
+            }
+            let ledger = &store.snapshot().ledger;
+            let inputs = (inputs.iter())
+                .map(|text| only(ledger.evidence_starting(text), text, unknown_evidence).cloned());
+            Ok(Source::Tool(adapter, inputs.collect::<Result<_, _>>()?))
+        }
+        _ => Err(reject(
+            "argument_missing",
+            "path",
+            "add_evidence needs `path`, or `tool` with `inputs`, and not both.",
+            "Call add_evidence again with one of them.",
+        )),
     }
-    let id = store.add_evidence(EvidenceKind::BinaryFacts, &stored)?;
-    let calls: usize = facts.functions.iter().map(|f| f.calls.len()).sum();
-    let body = format!(
-        "evidence {}\nRizin recovered from the program with sha256 {}: functions {}, direct calls {calls}, called imports {}",
-        short(id.as_str()),
-        short(&facts.sha256),
-        facts.functions.len(),
-        facts.imports.len(),
-    );
+}
+
+/// Whether a file given as `binary_facts` is a program for Rizin to read. Facts that
+/// were exported before are JSON and start with a brace; no program does.
+fn is_program(path: &str) -> Result<bool, Rejection> {
+    let mut first = [0u8; 1];
+    let file = std::fs::File::open(path).and_then(|mut file| file.read(&mut first));
+    let read = file.map_err(StoreError::Io)?;
+    Ok(read == 0 || first[0] != b'{')
+}
+
+/// Which outside tool made `id`, at which version, from which evidence.
+fn derivation(ledger: &Ledger, id: &EvidenceId) -> Option<String> {
+    let (tool, inputs) = ledger.derivation_of(id)?;
+    let from: Vec<&str> = (inputs.iter().take(SHOWN))
+        .map(|e| short(e.as_str()))
+        .collect();
+    let more = match inputs.len().saturating_sub(SHOWN) {
+        0 => String::new(),
+        more => format!(" and {more} more"),
+    };
+    let (id, version) = (&tool.id, &tool.version);
+    Some(format!(
+        "made by {id} {version} from evidence {}{more}",
+        from.join(", ")
+    ))
+}
+
+/// The reply to `add_evidence` for what a tool printed: its id, the run that made it
+/// and, for binary facts, how much was recovered.
+///
+/// # Errors
+/// The evidence cannot be read back.
+pub fn made(store: &Store, output: &EvidenceId) -> Result<String, Rejection> {
+    let (mut body, facts) = {
+        let ledger = &store.snapshot().ledger;
+        let mut body = format!("evidence {}", short(output.as_str()));
+        if let Some(line) = derivation(ledger, output) {
+            let _ = write!(body, "\n{line}");
+        }
+        (
+            body,
+            ledger.evidence_kind(output) == Some(EvidenceKind::BinaryFacts),
+        )
+    };
+    if facts {
+        let stored = store.evidence(output)?;
+        let stored = stored.ok_or_else(|| unknown_evidence(output.as_str()))?;
+        let facts: BinaryFacts =
+            rmcp::serde_json::from_slice(&stored).map_err(|e| StoreError::Core(e.into()))?;
+        let calls: usize = facts.functions.iter().map(|f| f.calls.len()).sum();
+        let _ = write!(
+            body,
+            "\nrecovered from the program with sha256 {}: functions {}, direct calls {calls}, called imports {}",
+            short(&facts.sha256),
+            facts.functions.len(),
+            facts.imports.len(),
+        );
+    }
     Ok(stamp(&store.snapshot(), &body))
 }
 
@@ -849,8 +929,7 @@ fn read_whole(path: &str, max: u64) -> Result<Vec<u8>, Rejection> {
 
 /// Stores a local capture file as evidence and returns its id. A HAR file given
 /// as `http_exchange` is split into one piece of evidence per entry. A file given
-/// as `binary_facts` must hold facts already; a program is analysed first, see
-/// [`add_rizin_output`].
+/// as `binary_facts` must hold facts already; a program goes through [`source`].
 ///
 /// # Errors
 /// The file cannot be read or stored, or is not in the format its kind requires.
@@ -952,6 +1031,7 @@ pub fn retract(store: &Store, claim: &str, reason: String) -> Result<String, Rej
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ledger_checkers::rizin_facts;
     use ledger_core::{ClaimKind, MemoryLayout, RequestSignature, SigAlgorithm, SigEncoding};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -1156,6 +1236,31 @@ mod tests {
     }
 
     #[test]
+    fn every_refused_source_of_evidence_reads_as_expected() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let sourced = |kind, path, tool, inputs: &[&str]| {
+            let inputs: Vec<String> = inputs.iter().map(|&i| i.to_owned()).collect();
+            let found = source(&store, kind, path, tool, &inputs);
+            rejected(found.map(|_| String::from("a source")))
+        };
+        let facts = EvidenceKind::BinaryFacts;
+        let all = [
+            // A target Rizin would open as a debugger, and a program that is not there.
+            sourced(facts, Some("dbg:///usr/bin/true"), None, &[]),
+            sourced(facts, Some("/no/such/program"), None, &[]),
+            sourced(facts, None, Some("objdump"), &[]),
+            sourced(EvidenceKind::MemorySnapshot, None, Some("rizin"), &[]),
+            sourced(facts, None, Some("rizin"), &["0123abcd"]),
+            sourced(facts, None, None, &[]),
+            sourced(facts, Some("Cargo.toml"), Some("rizin"), &[]),
+        ];
+        assert_eq!(store.snapshot().seq, 0, "a refused source was recorded");
+        insta::assert_snapshot!("source_rejections", all.join("\n"));
+        Ok(())
+    }
+
+    #[test]
     fn a_har_file_is_imported_and_listed_by_endpoint() -> TestResult {
         let dir = tempfile::tempdir()?;
         let store = Store::open(dir.path().join("l.db"))?;
@@ -1248,6 +1353,50 @@ mod tests {
         Ok(())
     }
 
+    /// The inputs Rizin reads for a file given as `binary_facts`.
+    fn for_rizin(
+        store: &Store,
+        path: &str,
+    ) -> Result<BTreeSet<EvidenceId>, Box<dyn std::error::Error>> {
+        match source(store, EvidenceKind::BinaryFacts, Some(path), None, &[]) {
+            Ok(Source::Tool(adapter, inputs)) if adapter.id == RIZIN.id => Ok(inputs),
+            Ok(_) => Err("not for Rizin".into()),
+            Err(r) => Err(r.to_string().into()),
+        }
+    }
+
+    #[test]
+    fn a_program_given_as_binary_facts_is_stored_for_rizin_to_read() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        // Tests run in the crate's directory, so this path is relative.
+        let inputs = for_rizin(&store, "Cargo.toml")?;
+        let program = EvidenceId::of(&std::fs::read("Cargo.toml")?);
+        assert_eq!(inputs, [program.clone()].into());
+        let kind = store.snapshot().ledger.evidence_kind(&program);
+        assert_eq!(kind, Some(EvidenceKind::Artifact));
+        // Naming the tool and the stored program comes to the same run.
+        let named = [short(program.as_str()).to_owned()];
+        let tool = source(
+            &store,
+            EvidenceKind::BinaryFacts,
+            None,
+            Some("rizin"),
+            &named,
+        );
+        assert!(matches!(tool, Ok(Source::Tool(_, read)) if read == inputs));
+        // Facts exported before are JSON, and are stored as they are.
+        let facts = dir.path().join("true.facts.json");
+        std::fs::write(
+            &facts,
+            br#"{"tool": "rizin", "sha256": "00", "functions": []}"#,
+        )?;
+        let facts = facts.to_str().ok_or("path")?;
+        let stored = source(&store, EvidenceKind::BinaryFacts, Some(facts), None, &[]);
+        assert!(matches!(stored, Ok(Source::Stored(_))));
+        Ok(())
+    }
+
     #[test]
     fn a_rizin_export_is_imported_and_call_edges_replay_on_it() -> TestResult {
         let dir = tempfile::tempdir()?;
@@ -1268,11 +1417,20 @@ mod tests {
         let lines: Vec<String> = (output.as_array().into_iter().flatten())
             .map(ToString::to_string)
             .collect();
-        let (tool, output) = ("rizin 0.9.1 @ linux-x86-64", lines.join("\n"));
-        let added = add_rizin_output(&store, tool, output.as_bytes());
-        let added = added.map_err(|r| r.to_string())?;
+        let output = lines.join("\n");
+        let program = dir.path().join("true");
+        std::fs::write(&program, b"\x7fELF the program")?;
+        let inputs = for_rizin(&store, program.to_str().ok_or("path")?)?;
+        // What the runner stores of what Rizin printed for it.
+        let rizin = ledger_core::ToolRef {
+            id: "rizin".into(),
+            version: "0.9.1 @ linux-x86-64".into(),
+        };
+        let facts = runner::record(&store, &RIZIN, rizin, inputs, output.as_bytes());
+        let added = made(&store, &facts.map_err(|r| r.to_string())?).map_err(|r| r.to_string())?;
         let facts = id_in(&added).to_owned();
         // Facts exported before can be added as a file; anything else under that kind cannot.
+        let tool = "rizin 0.9.1 @ linux-x86-64";
         let stored = rmcp::serde_json::to_vec(&rizin_facts(tool, output.as_bytes())?)?;
         let file = dir.path().join("true.facts.json");
         std::fs::write(&file, &stored)?;
@@ -1301,8 +1459,9 @@ mod tests {
         let mut say = |what: &str, result: Result<String, Rejection>| {
             let text = result.unwrap_or_else(|r| format!("REJECTED {r}"));
             let _ = write!(log, "{what}\n{text}\n\n");
+            text
         };
-        say(
+        let held = say(
             "propose: main calls setlocale",
             propose(
                 &store,
@@ -1310,6 +1469,7 @@ mod tests {
                 std::slice::from_ref(&facts),
             ),
         );
+        let held = id_in(&held).to_owned();
         say(
             "propose: fcn.00002590 calls main",
             propose(
@@ -1322,6 +1482,7 @@ mod tests {
             "ask about=subject true",
             ask(&store, About::Subject, None, Some("true"), None),
         );
+        say("explain: main calls setlocale", explain(&store, &held));
         insta::assert_snapshot!("rizin_import", log);
         Ok(())
     }
@@ -1336,10 +1497,14 @@ mod tests {
         let output = format!(
             r#"{{"bintype":"elf"}} {{"sha256":"00"}} [] [] [{{"offset":1,"name":"{name}"}}]"#
         );
-        let refused = add_rizin_output(&store, "rizin", output.as_bytes());
+        let rizin = ledger_core::ToolRef {
+            id: "rizin".into(),
+            version: "0.9.1".into(),
+        };
+        let refused = runner::record(&store, &RIZIN, rizin, BTreeSet::new(), output.as_bytes());
         let refused = refused.err().ok_or("stored")?;
         assert_eq!(refused.code, "evidence_too_large");
-        assert!(refused.next.starts_with("Nothing was recorded."));
+        assert!(refused.next.starts_with("No output was recorded."));
         assert_eq!(store.snapshot().seq, before);
         Ok(())
     }

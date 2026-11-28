@@ -3,21 +3,28 @@ source: crates/ledger-mcp/src/tools.rs
 expression: log
 ---
 add_evidence, a program Rizin has analysed
-seq 1
+seq 3
 evidence e016c2158cf8
-Rizin recovered from the program with sha256 3141dd350680: functions 2, direct calls 2, called imports 1
+made by rizin 0.9.1 @ linux-x86-64 from evidence d462524a3bbc
+recovered from the program with sha256 3141dd350680: functions 2, direct calls 2, called imports 1
 
 propose: main calls setlocale
-seq 3
+seq 5
 held         717b038f1a79  Within the code recovered from `true`, `main` calls `setlocale` directly (assumes the tool's analysis is right).
 
 propose: fcn.00002590 calls main
-seq 5
+seq 7
 refuted      b380f065dd7f  Within the code recovered from `true`, `fcn.00002590` calls `main` directly (assumes the tool's analysis is right).
 refuted by e016c2158cf8: `fcn.00002590` at 0x2590 does not call `main` directly; it makes no direct calls
 
 ask about=subject true
-seq 5
+seq 7
 held         717b038f1a79  Within the code recovered from `true`, `main` calls `setlocale` directly (assumes the tool's analysis is right).
 refuted      b380f065dd7f  Within the code recovered from `true`, `fcn.00002590` calls `main` directly (assumes the tool's analysis is right).
 end
+
+explain: main calls setlocale
+seq 7
+held         717b038f1a79  Within the code recovered from `true`, `main` calls `setlocale` directly (assumes the tool's analysis is right).
+held on 1 runs (replayed, not proved)
+evidence e016c2158cf8 was made by rizin 0.9.1 @ linux-x86-64 from evidence d462524a3bbc

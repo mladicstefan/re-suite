@@ -429,11 +429,14 @@ ends in.
 
 Two pieces every playbook stands on:
 
-- [ ] **Tool output is evidence.** One crate starts outside processes,
-      sandboxed, time-limited and found by absolute path. What a tool
-      prints is stored as evidence, and the log records which tool, at
-      which version, read which inputs. Checkers stay in-process and
-      pure. Rizin moves into this
+- [x] **Tool output is evidence.** One module of the server
+      (`ledger-mcp`'s `runner`) starts outside processes: found by
+      absolute path, with no environment and no input, on copies of their
+      inputs in a private directory, time-limited, one run at a time per
+      tool. What a tool prints is stored as evidence, and the log records
+      which tool, at which version, read which inputs (`Event::Derived`);
+      the same run is not made twice. Checkers stay in-process and pure.
+      Rizin runs through it. No memory limit or system sandbox yet
 - [x] **Every tool is pinned.** Nix for programs, a lockfile for npm
       packages: Wakaru, webcrack, retire.js, ast-grep, mitmproxy, wabt,
       wasm-tools, prettier, and a Wappalyzer rule engine that runs on
