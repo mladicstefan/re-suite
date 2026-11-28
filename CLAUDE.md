@@ -18,8 +18,10 @@ target; all checks replay captures.
 - `crates/ledger-bench`: `cargo run --release -p ledger-bench` checks the ROADMAP.md budgets.
 
 ## Checks
-- Full CI: `scripts/ci.sh` (fmt, clippy -D warnings, clippy of ledger-os for Windows and macOS, nextest, doctests, cargo deny, cargo machete).
-  The two extra targets come from `rustup target add x86_64-pc-windows-gnu aarch64-apple-darwin`.
+- Tools: `flake.nix` pins every outside tool (Rust, cargo tools, Rizin, Kaitai compiler, gdb, uv, llvm, Node, Chromium).
+  Run anything that needs one with `nix develop -c <command>`. Never install a tool on the machine; add it to the flake.
+- Full CI: `scripts/ci.sh` (fmt, clippy -D warnings, clippy of ledger-os for Windows and macOS, nextest, doctests, cargo deny, cargo machete, uv lock check).
+  It enters the flake's shell itself.
 - Hooks in `.claude/settings.json` run `cargo check -p <crate>` after `.rs` edits and
   `scripts/ci.sh` before `git commit`; they also guard protected config, hand-written
   versions and uncommented `#[allow]`.

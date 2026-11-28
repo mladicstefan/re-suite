@@ -63,6 +63,7 @@ section 9).
 | Proof certificates | Lean 4, bit-level lemmas only | Phase 6, optional |
 | Testing | Property, snapshot, crash and doc tests | Lemmas are property tests first |
 | Quality gates | Formatter, strict lints, dependency audit, CI script, editor hooks | Lints may not be weakened to pass |
+| Outside tools | Nix flake for every tool; uv lock for Python packages | Nothing is taken from the machine but Nix itself. Linux only so far |
 | Desktop interface | Native and cross-platform; framework undecided | Chosen by the human at the UI gate |
 
 **Deliberately not used:** a custom database, TigerBeetle (fixed schema),

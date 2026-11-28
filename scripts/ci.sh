@@ -2,6 +2,8 @@
 # Full local CI. Run from anywhere; fails on the first broken step.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Every tool below comes from flake.lock, not from this machine.
+[ -n "${IN_NIX_SHELL:-}" ] || exec nix develop --command scripts/ci.sh "$@"
 
 run() { printf '\n==> %s\n' "$*"; "$@"; }
 
@@ -15,4 +17,5 @@ run cargo nextest run --workspace
 run cargo test --workspace --doc
 run cargo deny check
 run cargo machete
+run uv lock --check
 printf '\nci: all checks passed\n'

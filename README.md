@@ -89,8 +89,14 @@ From `cargo tree -p <crate> --depth 1`:
 
 ## Running
 
+The only thing to install is [Nix](https://nixos.org/download) with flakes turned on. `flake.nix` and
+`flake.lock` pin every tool: the Rust toolchain, the cargo tools CI uses, Rizin, the Kaitai Struct compiler,
+gdb, uv, llvm, Node and Chromium. `uv.lock` pins the Python packages. Linux only so far.
+
 ```bash
+nix develop                            # a shell with all of the tools; the commands below run inside it
 cargo run -p ledger-mcp -- ledger.db   # MCP server on stdio
 cargo run -p ledger-cli -- ledger.db   # list claims with status
-scripts/ci.sh                          # fmt, clippy (ledger-os also for Windows and macOS), nextest, doctests, deny, machete
+uv run --locked docs/trials/lifter-compare.py <program>   # a trial script, with its Python packages
+scripts/ci.sh                          # enters the shell itself: fmt, clippy (ledger-os also for Windows and macOS), nextest, doctests, deny, machete, uv lock
 ```
