@@ -1,0 +1,16 @@
+---
+source: crates/ledger-core/src/session.rs
+expression: "refused.join(\"\\n\")"
+---
+a capture file starts with a `session` line
+a capture file starts with a `session` line; line 1, column 6: unknown variant `log`, expected one of `session`, `exchange`, `script`
+a capture file starts with a `session` line
+line 2: a second `session` line
+line 2: a request to tracker.example, which was not approved
+line 2: a request to elsewhere.example, which was not approved
+line 2, column 1: expected value
+line 2, column 33: an address is empty
+line 2, column 46: an address is empty
+line 2, column 57: missing field `script`
+line 2, column 84: invalid value: integer `0`, expected a nonzero u32
+shop.example is both approved and blocked

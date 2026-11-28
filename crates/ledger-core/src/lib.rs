@@ -11,6 +11,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub mod format;
 pub use format::Format;
+pub mod session;
+pub use session::Session;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
@@ -1080,6 +1082,9 @@ pub enum EvidenceKind {
     LiveSnapshot,
     /// A file as it is, such as a program or a script: what most outside tools read.
     Artifact,
+    /// A browser session from `ledger-capture web`: its exchanges in order, the calls
+    /// that sent each, and its scripts, as [`Session`].
+    Session,
 }
 
 /// One function an analysis tool recovered.

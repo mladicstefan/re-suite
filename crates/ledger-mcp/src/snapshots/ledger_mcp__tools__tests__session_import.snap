@@ -1,0 +1,31 @@
+---
+source: crates/ledger-mcp/src/tools.rs
+expression: log
+---
+add_evidence kind=session
+seq 5
+imported a session by chromium 158.0: exchanges 3, scripts 1, new pieces of evidence 5
+approved hosts: shop.example
+blocked hosts: tracker.example; nothing was sent to them. Only the person can approve one, by capturing again
+evidence c77f90911f4f
+
+add it again
+seq 5
+imported a session by chromium 158.0: exchanges 3, scripts 1, new pieces of evidence 0
+approved hosts: shop.example
+blocked hosts: tracker.example; nothing was sent to them. Only the person can approve one, by capturing again
+evidence c77f90911f4f
+
+ask about=evidence, the endpoint the script called
+seq 5
+evidence 7e3507778945  200  GET https://shop.example/api/cart
+end
+
+a HAR file given as a session
+REJECTED evidence_malformed [path]: It is not a capture file: a capture file starts with a `session` line; line 1, column 6: unknown variant `log`, expected one of `session`, `exchange`, `script`. Next: Nothing was recorded. A session is the file a person writes with `ledger-capture web`; give that file.
+
+a request to a host nobody approved
+REJECTED evidence_malformed [path]: It is not a capture file: line 5: a request to elsewhere.example, which was not approved. Next: Nothing was recorded. A session is the file a person writes with `ledger-capture web`; give that file.
+
+its script stored as a secret already
+REJECTED evidence_other_kind [e99df52da3d6]: These bytes are already stored as secret, and stored evidence keeps its kind. Next: Nothing was recorded. Cite the evidence under the kind it has, or tell the human if that kind is wrong.

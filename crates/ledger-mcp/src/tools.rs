@@ -14,8 +14,8 @@ use ledger_checkers::{
 };
 use ledger_core::{
     BinaryFacts, Capture, CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event,
-    EvidenceId, EvidenceKind, HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict,
-    admit,
+    EvidenceId, EvidenceKind, HttpExchange, HttpRequest, HttpResponse, Ledger, Session, Status,
+    Verdict, admit,
 };
 use ledger_store::{Snapshot, Store, StoreError};
 use schemars::JsonSchema;
@@ -927,13 +927,79 @@ fn read_whole(path: &str, max: u64) -> Result<Vec<u8>, Rejection> {
     Ok(bytes)
 }
 
+/// Stores a capture file from `ledger-capture web`: each exchange as `http_exchange`
+/// evidence, each script's source as `artifact`, then the session record that names
+/// them by id. A file that is not a capture records nothing.
+fn add_session(store: &Store, path: &str) -> Result<String, Rejection> {
+    let bytes = read_whole(path, Session::MAX_CAPTURE as u64)?;
+    let captured = Session::from_capture(&bytes).map_err(|why| {
+        reject(
+            "evidence_malformed",
+            "path",
+            format!("It is not a capture file: {why}."),
+            "Nothing was recorded. A session is the file a person writes with `ledger-capture web`; give that file.",
+        )
+    })?;
+    drop(bytes);
+    let session = &captured.session;
+    let named = (session.exchanges().iter())
+        .map(|sent| (&sent.exchange, EvidenceKind::HttpExchange))
+        .chain((session.scripts().iter()).map(|script| (&script.source, EvidenceKind::Artifact)));
+    // Checked before the first write, so that a refusal leaves nothing behind.
+    {
+        let ledger = &store.snapshot().ledger;
+        for (id, kind) in named {
+            match ledger.evidence_kind(id) {
+                Some(stored) if stored != kind => {
+                    return Err(StoreError::OtherKind(id.clone(), stored).into());
+                }
+                _ => {}
+            }
+        }
+    }
+    let before = store.snapshot().seq;
+    for exchange in &captured.exchanges {
+        store.add_evidence(EvidenceKind::HttpExchange, exchange)?;
+    }
+    for source in &captured.sources {
+        store.add_evidence(EvidenceKind::Artifact, source)?;
+    }
+    let id = store.add_evidence(EvidenceKind::Session, &captured.record)?;
+    let after = store.snapshot();
+    let header = session.header();
+    let list = |hosts: &BTreeSet<String>| hosts.iter().cloned().collect::<Vec<_>>().join(", ");
+    let blocked = match header.blocked.len() {
+        0 => "none".to_owned(),
+        _ => format!(
+            "{}; nothing was sent to them. Only the person can approve one, by capturing again",
+            list(&header.blocked)
+        ),
+    };
+    let body = format!(
+        "imported a session by {} {}: exchanges {}, scripts {}, new pieces of evidence {}\n\
+         approved hosts: {}\nblocked hosts: {blocked}\nevidence {}",
+        header.tool.id,
+        header.tool.version,
+        session.exchanges().len(),
+        session.scripts().len(),
+        after.seq - before,
+        list(&header.approved),
+        short(id.as_str()),
+    );
+    Ok(stamp(&after, &body))
+}
+
 /// Stores a local capture file as evidence and returns its id. A HAR file given
-/// as `http_exchange` is split into one piece of evidence per entry. A file given
-/// as `binary_facts` must hold facts already; a program goes through [`source`].
+/// as `http_exchange` is split into one piece of evidence per entry, and a session
+/// from `ledger-capture web` into its exchanges, its scripts and the record of both.
+/// A file given as `binary_facts` must hold facts already; a program goes through [`source`].
 ///
 /// # Errors
 /// The file cannot be read or stored, or is not in the format its kind requires.
 pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<String, Rejection> {
+    if kind == EvidenceKind::Session {
+        return add_session(store, path);
+    }
     if kind == EvidenceKind::BinaryFacts {
         let bytes = read_whole(path, MAX_PARSED_EVIDENCE as u64)?;
         if rmcp::serde_json::from_slice::<BinaryFacts>(&bytes).is_err() {
@@ -1349,6 +1415,138 @@ mod tests {
             ask(&store, About::Evidence, None, None, None),
         );
         insta::assert_snapshot!("har_import", log);
+        assert!(!log.contains("s3cret"), "a query string was echoed");
+        Ok(())
+    }
+
+    /// A session as `ledger-capture web` writes it, by hand.
+    const SESSION: &str = r#"{"session": {"tool": {"id": "chromium", "version": "158.0"}, "approved": ["shop.example"], "blocked": ["tracker.example"]}}
+{"exchange": {"at": 0, "page": "https://shop.example/", "exchange": {"request": {"method": "GET", "url": "https://shop.example/"}, "response": {"status": 200, "body": {"text": "<script src=/app.js></script>"}}}}}
+{"exchange": {"at": 31, "page": "https://shop.example/", "exchange": {"request": {"method": "GET", "url": "https://shop.example/app.js"}, "response": {"status": 200, "body": {"text": "fetch('/api/cart?token=s3cret')"}}}}}
+{"script": {"address": "https://shop.example/app.js", "source": "fetch('/api/cart?token=s3cret')", "source_map": "inline"}}
+{"exchange": {"at": 40, "page": "https://shop.example/", "stack": [{"script": "https://shop.example/app.js", "line": 1, "column": 1}], "exchange": {"request": {"method": "GET", "url": "https://shop.example/api/cart?token=s3cret"}, "response": {"status": 200, "body": {"text": "{\"items\": []}"}}}}}
+"#;
+
+    /// The full id of the evidence a reply names on its last line.
+    fn named(store: &Store, reply: &str) -> Result<EvidenceId, Box<dyn std::error::Error>> {
+        let short = reply.rsplit(' ').next().unwrap_or_default();
+        let ledger = &store.snapshot().ledger;
+        let id = only(ledger.evidence_starting(short), short, unknown_evidence);
+        Ok(id.map_err(|r| r.to_string())?.clone())
+    }
+
+    /// The session a reply names lists each exchange and the script by the evidence
+    /// stored for it.
+    fn record_names_what_was_stored(store: &Store, reply: &str) -> TestResult {
+        let record = store.evidence(&named(store, reply)?)?.ok_or("no record")?;
+        let session = Session::read(&record)?;
+        let ledger = &store.snapshot().ledger;
+        let mut urls = Vec::new();
+        for sent in session.exchanges() {
+            assert_eq!(
+                ledger.evidence_kind(&sent.exchange),
+                Some(EvidenceKind::HttpExchange)
+            );
+            let stored = store.evidence(&sent.exchange)?.ok_or("no exchange")?;
+            let exchange: HttpExchange = rmcp::serde_json::from_slice(&stored)?;
+            urls.push(exchange.request.url);
+        }
+        let shop = "https://shop.example";
+        assert_eq!(
+            urls,
+            [
+                format!("{shop}/"),
+                format!("{shop}/app.js"),
+                format!("{shop}/api/cart?token=s3cret")
+            ]
+        );
+        let frame = &session.exchanges()[2].stack[0];
+        assert_eq!(
+            (frame.script.as_str(), frame.line.get()),
+            ("https://shop.example/app.js", 1)
+        );
+        let script = session.scripts().first().ok_or("no script")?;
+        assert_eq!(
+            ledger.evidence_kind(&script.source),
+            Some(EvidenceKind::Artifact)
+        );
+        let source = store.evidence(&script.source)?.ok_or("no source")?;
+        assert_eq!(&source[..], b"fetch('/api/cart?token=s3cret')");
+        Ok(())
+    }
+
+    #[test]
+    fn a_session_is_imported_once_as_its_exchanges_scripts_and_record() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let write = |name: &str, text: &str| -> Result<String, Box<dyn std::error::Error>> {
+            let file = dir.path().join(name);
+            std::fs::write(&file, text)?;
+            Ok(file.to_str().ok_or("path")?.to_owned())
+        };
+        let path = write("shop.session", SESSION)?;
+        let mut log = String::new();
+        let mut say = |what: &str, result: Result<String, Rejection>| {
+            let text = result.unwrap_or_else(|r| format!("REJECTED {r}"));
+            let _ = write!(log, "{what}\n{text}\n\n");
+            text
+        };
+        let added = say(
+            "add_evidence kind=session",
+            add_evidence(&store, EvidenceKind::Session, &path),
+        );
+        let seq = store.snapshot().seq;
+        say(
+            "add it again",
+            add_evidence(&store, EvidenceKind::Session, &path),
+        );
+        assert_eq!(
+            store.snapshot().seq,
+            seq,
+            "a second import recorded something"
+        );
+        say(
+            "ask about=evidence, the endpoint the script called",
+            ask(
+                &store,
+                About::Evidence,
+                None,
+                Some("GET shop.example/api/cart"),
+                None,
+            ),
+        );
+
+        record_names_what_was_stored(&store, &added)?;
+
+        // A file that is not a capture, or one whose script is stored as another kind
+        // already, records nothing.
+        let har = write("session.har", r#"{"log": {"entries": []}}"#)?;
+        let elsewhere = write(
+            "elsewhere.session",
+            &SESSION.replace("shop.example/api", "elsewhere.example/api"),
+        )?;
+        let other = Store::open(dir.path().join("other.db"))?;
+        let source = write("app.js", "fetch('/api/cart?token=s3cret')")?;
+        add_evidence(&other, EvidenceKind::Secret, &source).map_err(|r| r.to_string())?;
+        let (seq, other_seq) = (store.snapshot().seq, other.snapshot().seq);
+        say(
+            "a HAR file given as a session",
+            add_evidence(&store, EvidenceKind::Session, &har),
+        );
+        say(
+            "a request to a host nobody approved",
+            add_evidence(&store, EvidenceKind::Session, &elsewhere),
+        );
+        say(
+            "its script stored as a secret already",
+            add_evidence(&other, EvidenceKind::Session, &path),
+        );
+        assert_eq!(
+            (store.snapshot().seq, other.snapshot().seq),
+            (seq, other_seq),
+            "a refused import recorded something"
+        );
+        insta::assert_snapshot!("session_import", log);
         assert!(!log.contains("s3cret"), "a query string was echoed");
         Ok(())
     }
