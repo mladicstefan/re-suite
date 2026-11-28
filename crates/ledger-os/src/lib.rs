@@ -236,6 +236,52 @@ fn plain(path: PathBuf) -> PathBuf {
 /// `SQLite` settings that make `synchronous = FULL` mean "on the disk". Apple's
 /// `fsync` leaves data in the drive's cache, and `SQLite` only asks for a real
 /// flush there when told to. Empty on systems where `fsync` already does.
+/// The name the system gives the running process `pid`.
+///
+/// # Errors
+/// There is no such process, or it cannot be looked at.
+#[cfg(target_os = "linux")]
+pub fn process_name(pid: u32) -> io::Result<String> {
+    Ok(std::fs::read_to_string(format!("/proc/{pid}/comm"))?
+        .trim_end()
+        .to_owned())
+}
+
+/// Reads `len` bytes at `address` from the memory of the running process `pid`,
+/// without stopping it. The process is only read.
+///
+/// # Errors
+/// The system does not let this user read that process, or the range is not all mapped.
+#[cfg(target_os = "linux")]
+pub fn read_memory(pid: u32, address: u64, len: usize) -> io::Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt as _;
+    let memory = File::open(format!("/proc/{pid}/mem"))?;
+    let mut bytes = vec![0; len];
+    memory.read_exact_at(&mut bytes, address)?;
+    Ok(bytes)
+}
+
+#[cfg(not(target_os = "linux"))]
+const LINUX_ONLY: &str = "reading a running process is only written for Linux";
+
+/// The name the system gives the running process `pid`.
+///
+/// # Errors
+/// Always, on this system: see [`read_memory`].
+#[cfg(not(target_os = "linux"))]
+pub fn process_name(_pid: u32) -> io::Result<String> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, LINUX_ONLY))
+}
+
+/// Reads `len` bytes at `address` from the memory of the running process `pid`.
+///
+/// # Errors
+/// Always, on this system: it is written for Linux only so far.
+#[cfg(not(target_os = "linux"))]
+pub fn read_memory(_pid: u32, _address: u64, _len: usize) -> io::Result<Vec<u8>> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, LINUX_ONLY))
+}
+
 #[cfg(target_vendor = "apple")]
 pub const SQLITE_DURABLE: &str = "PRAGMA fullfsync = ON; PRAGMA checkpoint_fullfsync = ON;";
 #[cfg(not(target_vendor = "apple"))]
@@ -244,6 +290,21 @@ pub const SQLITE_DURABLE: &str = "";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_reads_memory_it_may_read_and_nothing_else() -> io::Result<()> {
+        let known = std::hint::black_box(*b"what the process holds");
+        let address = u64::try_from(known.as_ptr().addr()).map_err(io::Error::other)?;
+        let me = std::process::id();
+        assert_eq!(read_memory(me, address, known.len())?, known);
+        assert_ne!(process_name(me)?, "");
+        // Nothing is mapped at address 0, and process 0 is not a process.
+        assert!(read_memory(me, 0, 16).is_err());
+        assert!(read_memory(0, address, 16).is_err());
+        assert!(process_name(0).is_err());
+        Ok(())
+    }
 
     #[test]
     fn a_file_is_written_once_and_maps_back() -> io::Result<()> {

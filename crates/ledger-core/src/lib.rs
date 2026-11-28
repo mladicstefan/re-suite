@@ -1075,6 +1075,9 @@ pub enum EvidenceKind {
     Secret,
     /// What an analysis tool recovered from one binary, as [`BinaryFacts`].
     BinaryFacts,
+    /// Memory read from a running process, with what a human saw at that moment:
+    /// a [`Capture`] line, then the bytes.
+    LiveSnapshot,
 }
 
 /// One function an analysis tool recovered.
@@ -1105,6 +1108,68 @@ pub struct BinaryFacts {
     /// Called addresses that stand for an imported symbol, with the symbol's name.
     #[serde(default)]
     pub imports: BTreeMap<u64, String>,
+}
+
+/// What a human read off the running program when its memory was captured: a
+/// number, or the range a rounded display allows. Numbers above 2^53 are not exact.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Observed {
+    pub min: f64,
+    pub max: f64,
+}
+
+impl fmt::Display for Observed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.min.to_bits() == self.max.to_bits() {
+            write!(f, "{}", self.min)
+        } else {
+            write!(f, "{} to {}", self.min, self.max)
+        }
+    }
+}
+
+/// The first line of `EvidenceKind::LiveSnapshot` evidence, as JSON. The captured
+/// bytes follow the line break, so they are sliced, never parsed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Capture {
+    /// The program's name as the system reported it.
+    pub process: String,
+    pub pid: u32,
+    /// Where in the process's memory the bytes were.
+    pub address: u64,
+    /// What the human saw at that moment, by the name a layout gives the field.
+    pub observed: BTreeMap<String, Observed>,
+}
+
+impl Capture {
+    /// The longest first line that is read.
+    pub const MAX_HEADER: usize = 64 << 10;
+    /// The most memory one capture holds: an object or a region, not a whole process.
+    pub const MAX_MEMORY: usize = 64 << 20;
+
+    /// The evidence file for `memory`: this as one line of JSON, then the bytes.
+    ///
+    /// # Errors
+    /// Fails only if serialization fails.
+    pub fn encode(&self, memory: &[u8]) -> Result<Vec<u8>, CoreError> {
+        let mut out = serde_json::to_vec(self)?;
+        out.push(b'\n');
+        out.extend_from_slice(memory);
+        Ok(out)
+    }
+
+    /// Splits evidence into what was recorded about the capture and the captured bytes.
+    ///
+    /// # Errors
+    /// The evidence does not start with a line this type reads.
+    pub fn split(evidence: &[u8]) -> Result<(Self, &[u8]), String> {
+        let head = &evidence[..evidence.len().min(Self::MAX_HEADER)];
+        let end = (head.iter().position(|b| *b == b'\n'))
+            .ok_or("a live capture starts with one line of JSON, which was not found")?;
+        let capture = serde_json::from_slice(&head[..end])
+            .map_err(|why| format!("the first line of the capture does not read: {why}"))?;
+        Ok((capture, &evidence[end + 1..]))
+    }
 }
 
 /// One header line. A list of these, not a map: names repeat, and HTTP/2 captures
@@ -1826,6 +1891,47 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use proptest::prelude::*;
+
+    #[test]
+    fn a_live_capture_splits_into_what_was_seen_and_the_bytes() -> Result<(), CoreError> {
+        let capture = Capture {
+            process: "game".into(),
+            pid: 4242,
+            address: 0x7f00_1000,
+            observed: BTreeMap::from([(
+                "hp".to_owned(),
+                Observed {
+                    min: 72.5,
+                    max: 73.5,
+                },
+            )]),
+        };
+        // The bytes may hold line breaks of their own; only the first one ends the line.
+        let memory = b"\x49\n\0\0\n";
+        let stored = capture.encode(memory)?;
+        assert_eq!(Capture::split(&stored), Ok((capture.clone(), &memory[..])));
+        assert_eq!(capture.observed["hp"].to_string(), "72.5 to 73.5");
+        assert_eq!(
+            Observed {
+                min: 73.0,
+                max: 73.0
+            }
+            .to_string(),
+            "73"
+        );
+        for broken in [
+            &b"no line break"[..],
+            b"{\"process\": 1}\nbytes",
+            b"\nbytes",
+            b"",
+        ] {
+            assert!(Capture::split(broken).is_err(), "{broken:?}");
+        }
+        // A first line longer than the limit is not searched for.
+        let long = [vec![b' '; Capture::MAX_HEADER], stored].concat();
+        assert!(Capture::split(&long).is_err());
+        Ok(())
+    }
 
     fn layout(size: u64) -> Claim {
         Claim {

@@ -54,6 +54,8 @@ struct AddEvidenceArgs {
     kind: EvidenceKind,
     /// Local path of a saved capture or snapshot. For `binary_facts` it is the
     /// program file itself: the server runs Rizin on it. The program is read, never run.
+    /// For `live_snapshot` it is a file a human made with `ledger-capture`: memory of a
+    /// running process and what they saw then. This server never reads a process.
     path: String,
 }
 

@@ -985,6 +985,7 @@ dependencies = [
  "clap",
  "ledger-checkers",
  "ledger-core",
+ "ledger-os",
  "ledger-store",
  "tempfile",
 ]

@@ -66,6 +66,14 @@ Every new `ClaimKind` variant needs all four, in the same change:
 ## Checkers are offline
 - Checkers replay saved evidence only. Never send anything to a live target.
 
+## Live captures are a person's
+- Memory of a running process is read by `ledger-capture` only, for a person at a
+  terminal who types the process's name. Never read a process from the server, a
+  checker or a test of another process, and never give the tool a terminal it does
+  not have (`script`, a pty) to get past the question.
+- What the person saw travels in the capture's first line, so it is under the
+  evidence's hash. A layout field named like a seen value must read as it.
+
 ## Compile time first
 - Prefer `const` items and `const fn` over values computed at run time, and
   over macros wherever a `const fn`, an associated const or a generic can say

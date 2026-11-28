@@ -376,7 +376,10 @@ the ledger changes no status, and the write and read budgets hold.
       anchors that survive rebuilds and a status diff
 - [ ] **Live captures.** Snapshots of a running process, taken only with
       human approval, that carry what the human observed at capture time
-      (the HUD showed 73 HP); a layout claim must decode to those values
+      (the HUD showed 73 HP); a layout claim must decode to those values.
+      Built: `ledger-capture` and `live_snapshot` evidence, tested on the
+      tool's own process. Still to do: the first capture of another
+      process, by a person, with an agent working from it
 - [x] **Formats.** File claims through Kaitai Struct: a `format` claim
       carries a description, and the checker walks it over each file. It
       places fields at offsets a count decides (`docs/trials/format-claims.md`).

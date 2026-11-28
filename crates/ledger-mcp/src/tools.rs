@@ -14,8 +14,9 @@ use ledger_checkers::{
     rizin_facts,
 };
 use ledger_core::{
-    BinaryFacts, CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event, EvidenceId,
-    EvidenceKind, HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict, admit,
+    BinaryFacts, Capture, CheckerRef, Claim, ClaimId, ClaimKind, CoreError, Endpoint, Event,
+    EvidenceId, EvidenceKind, HttpExchange, HttpRequest, HttpResponse, Ledger, Status, Verdict,
+    admit,
 };
 use ledger_store::{Snapshot, Store, StoreError};
 use schemars::JsonSchema;
@@ -35,6 +36,8 @@ const CHECK_LIMIT: Duration = Duration::from_secs(5);
 /// many exchanges each within [`MAX_PARSED_EVIDENCE`], so it may be larger than any
 /// one capture; it is parsed whole, which takes a few times its size in memory.
 const MAX_HAR: u64 = 256 << 20;
+/// Largest live capture `add_evidence` reads: its first line and its memory.
+const MAX_CAPTURE: u64 = (Capture::MAX_HEADER + Capture::MAX_MEMORY) as u64;
 
 /// A refusal an agent can act on: a stable code, what it is about, and what to do next.
 #[derive(Debug)]
@@ -863,6 +866,31 @@ pub fn add_evidence(store: &Store, kind: EvidenceKind, path: &str) -> Result<Str
             ));
         }
     }
+    if kind == EvidenceKind::LiveSnapshot {
+        let bytes = read_whole(path, MAX_CAPTURE)?;
+        let (capture, memory) = Capture::split(&bytes).map_err(|why| {
+            reject(
+                "evidence_malformed",
+                "path",
+                why,
+                "Nothing was recorded. Only a human makes a live capture, with `ledger-capture` in a terminal; give the file it wrote.",
+            )
+        })?;
+        let id = store.add_evidence(kind, &bytes)?;
+        let seen: Vec<String> = (capture.observed.iter())
+            .map(|(name, seen)| format!("{name} {seen}"))
+            .collect();
+        // The agent is told what the human saw, under the names a layout must use.
+        let body = format!(
+            "{} bytes of `{}` at {:#x}; seen then: {}\nevidence {}",
+            memory.len(),
+            capture.process,
+            capture.address,
+            seen.join(", "),
+            short(id.as_str())
+        );
+        return Ok(stamp(&store.snapshot(), &body));
+    }
     let har = (kind == EvidenceKind::HttpExchange)
         .then(|| read_whole(path, MAX_HAR))
         .transpose()?
@@ -1510,6 +1538,60 @@ mod tests {
         let held = explained.lines().filter(|l| l.starts_with("held on"));
         assert_eq!(held.count(), LISTED);
         assert!(!explained.contains("not shown"), "{explained}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_live_capture_is_evidence_with_what_was_seen() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let seen = ledger_core::Observed {
+            min: 73.0,
+            max: 73.0,
+        };
+        let capture = Capture {
+            process: "game".into(),
+            pid: 4242,
+            address: 0x7f00_1000,
+            observed: BTreeMap::from([("hp".to_owned(), seen)]),
+        };
+        let memory = [[0u8; 4], 73u32.to_le_bytes()].concat();
+        let file = dir.path().join("player.capture");
+        std::fs::write(&file, capture.encode(&memory)?)?;
+        let path = file.to_str().ok_or("path")?;
+        let added =
+            add_evidence(&store, EvidenceKind::LiveSnapshot, path).map_err(|r| r.to_string())?;
+        assert!(
+            added.contains("8 bytes of `game` at 0x7f001000; seen then: hp 73\nevidence "),
+            "{added}"
+        );
+        let evidence = [added.rsplit(' ').next().unwrap_or_default().to_owned()];
+        let player = |hp_at| Claim {
+            kind: ClaimKind::MemoryLayout(MemoryLayout {
+                type_name: "Player".into(),
+                size: 8,
+                fields: vec![ledger_core::FieldLayout {
+                    name: "hp".into(),
+                    offset: hp_at,
+                    len: 4,
+                    is: None,
+                }],
+            }),
+            premises: BTreeSet::new(),
+        };
+        let wrong = propose(&store, player(0), &evidence).map_err(|r| r.to_string())?;
+        let why = "field `hp` at +0x0 reads 0, but 73 was seen when the capture was taken";
+        assert!(wrong.contains(why), "{wrong}");
+        let right = propose(&store, player(4), &evidence).map_err(|r| r.to_string())?;
+        assert!(
+            right.lines().nth(1).is_some_and(|l| l.starts_with("held")),
+            "{right}"
+        );
+
+        // The memory alone, or anything else an agent writes, is not a capture.
+        std::fs::write(&file, &memory)?;
+        let refused = add_evidence(&store, EvidenceKind::LiveSnapshot, path);
+        assert!(refused.is_err_and(|r| r.code == "evidence_malformed"));
         Ok(())
     }
 

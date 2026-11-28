@@ -121,21 +121,28 @@ fn replay<E: Sync>(
     }
 }
 
+/// A snapshot and, when it was captured from a running process, what a human saw then.
+pub struct Snapshot<'e> {
+    pub bytes: &'e [u8],
+    pub observed: BTreeMap<String, ledger_core::Observed>,
+}
+
 pub struct MemoryLayoutChecker;
 
 impl<'e> Checker<'e> for MemoryLayoutChecker {
     const ID: &'static str = "memory_layout";
     const VERSION: u32 = 4;
     type Claim = MemoryLayout;
-    type Evidence = &'e [u8];
+    type Evidence = Snapshot<'e>;
 
     fn check(
         &self,
         claim: &MemoryLayout,
-        evidence: &[Item<&'e [u8]>],
+        evidence: &[Item<Snapshot<'e>>],
         deadline: Instant,
     ) -> Result<Verdict, CheckError> {
-        Ok(replay(evidence, deadline, |bytes| {
+        Ok(replay(evidence, deadline, |snapshot| {
+            let bytes = snapshot.bytes;
             if (bytes.len() as u64) < claim.size {
                 return Err(format!(
                     "snapshot is {} bytes, `{}` needs {}",
@@ -144,7 +151,8 @@ impl<'e> Checker<'e> for MemoryLayoutChecker {
                     claim.size
                 ));
             }
-            fields_hold(&claim.fields, bytes)
+            fields_hold(&claim.fields, bytes)?;
+            seen_holds(&claim.fields, snapshot)
         }))
     }
 }
@@ -214,6 +222,49 @@ impl<'e> Checker<'e> for RecordArrayChecker {
 }
 
 /// Little-endian unsigned value of up to 8 bytes.
+/// Whether each field named like something the human saw reads as what they saw.
+/// A layout that gives no field that name says nothing about the value.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "what a human reads off a screen is far below 2^53"
+)]
+fn seen_holds(fields: &[ledger_core::FieldLayout], snapshot: &Snapshot<'_>) -> Result<(), String> {
+    for (name, seen) in &snapshot.observed {
+        let Some(field) = fields.iter().find(|f| f.name == *name) else {
+            continue;
+        };
+        let found = slice(snapshot.bytes, field.offset, field.len)
+            .ok_or_else(|| format!("field `{name}` lies outside the snapshot"))?;
+        let value = match (&field.is, found.len()) {
+            (Some(FieldKind::Float { .. }), 4) => {
+                f64::from(f32::from_bits(u32::try_from(uint(found)).unwrap_or(0)))
+            }
+            (Some(FieldKind::Float { .. }), 8) => f64::from_bits(uint(found)),
+            (Some(FieldKind::Int { .. }), 1 | 2 | 4 | 8) => int(found) as f64,
+            (_, 1 | 2 | 4 | 8) => uint(found) as f64,
+            (_, len) => {
+                return Err(format!(
+                    "field `{name}` is {len} bytes, which reads as no number; {seen} was seen when the capture was taken"
+                ));
+            }
+        };
+        if !(seen.min..=seen.max).contains(&value) {
+            return Err(format!(
+                "field `{name}` at +{:#x} reads {value}, but {seen} was seen when the capture was taken",
+                field.offset
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A little-endian signed integer of 1, 2, 4 or 8 bytes.
+fn int(bytes: &[u8]) -> i64 {
+    // Shift the field's top bit up to bit 63 and back down to extend its sign.
+    let shift = 64 - 8 * u32::try_from(bytes.len()).unwrap_or(8);
+    i64::from_le_bytes((uint(bytes) << shift).to_le_bytes()) >> shift
+}
+
 fn uint(bytes: &[u8]) -> u64 {
     (bytes.iter().rev()).fold(0, |value, byte| value << 8 | u64::from(*byte))
 }
@@ -240,9 +291,7 @@ fn field_holds(kind: &FieldKind, bytes: &[u8]) -> Result<(), String> {
         }
         FieldKind::Int { min, max } => {
             sized(matches!(bytes.len(), 1 | 2 | 4 | 8))?;
-            // Shift the field's top bit up to bit 63 and back down to extend its sign.
-            let shift = 64 - 8 * u32::try_from(bytes.len()).unwrap_or(8);
-            let value = i64::from_le_bytes((uint(bytes) << shift).to_le_bytes()) >> shift;
+            let value = int(bytes);
             if (*min..=*max).contains(&value) {
                 Ok(())
             } else {
@@ -1290,9 +1339,44 @@ fn facts(evidence: &[Raw<'_>]) -> Result<Vec<Item<BinaryFacts>>, CheckError> {
     )
 }
 
-/// The evidence as memory snapshots, which are only sliced, never parsed.
+/// The evidence as snapshots: files given as they are, and live captures with what
+/// was seen when they were taken. The bytes are only sliced, never parsed.
+fn captures<'e>(evidence: &[Raw<'e>]) -> Result<Vec<Item<Snapshot<'e>>>, CheckError> {
+    (evidence.iter())
+        .map(|(id, kind, bytes)| {
+            let data = match kind {
+                EvidenceKind::MemorySnapshot => Snapshot {
+                    bytes,
+                    observed: BTreeMap::new(),
+                },
+                EvidenceKind::LiveSnapshot => {
+                    let (capture, memory) = ledger_core::Capture::split(bytes)
+                        .map_err(|why| CheckError::Malformed(id.clone(), why))?;
+                    Snapshot {
+                        bytes: memory,
+                        observed: capture.observed,
+                    }
+                }
+                other => return Err(CheckError::WrongEvidence(*other)),
+            };
+            Ok(Item {
+                id: id.clone(),
+                size: bytes.len(),
+                data,
+            })
+        })
+        .collect()
+}
+
+/// The evidence as the bytes of snapshots, for the claims that take no account of
+/// what was seen at a capture.
 fn snapshots<'e>(evidence: &[Raw<'e>]) -> Result<Vec<Item<&'e [u8]>>, CheckError> {
-    decode(EvidenceKind::MemorySnapshot, usize::MAX, evidence, Ok)
+    let bytes = |it: Item<Snapshot<'e>>| Item {
+        id: it.id,
+        size: it.size,
+        data: it.data.bytes,
+    };
+    Ok(captures(evidence)?.into_iter().map(bytes).collect())
 }
 
 /// Runs one checker inside a trace span, giving it `limit` to finish.
@@ -1352,7 +1436,7 @@ pub fn check_claim(
         }
         ClaimKind::FieldRelation(c) => run(&RelationChecker, id, c, snapshots(evidence), limit),
         ClaimKind::RecordArray(c) => run(&RecordArrayChecker, id, c, snapshots(evidence), limit),
-        ClaimKind::MemoryLayout(c) => run(&MemoryLayoutChecker, id, c, snapshots(evidence), limit),
+        ClaimKind::MemoryLayout(c) => run(&MemoryLayoutChecker, id, c, captures(evidence), limit),
         ClaimKind::StatusSet(c) => run(&StatusChecker, id, c, exchanges(evidence, claim), limit),
         ClaimKind::RequestBodySchema(c) => {
             run(&BodySchemaChecker, id, c, exchanges(evidence, claim), limit)
@@ -1681,11 +1765,11 @@ mod tests {
         };
         // Sizes 40, 80, 8 and 20: three are too short, and the 8-byte one is the smallest.
         let snapshots = [vec![0u8; 40], vec![0; 80], vec![0; 8], vec![0; 20]];
-        let items: Vec<Item<&[u8]>> = (snapshots.iter())
+        let items: Vec<Item<Snapshot<'_>>> = (snapshots.iter())
             .map(|bytes| Item {
                 id: EvidenceId::of(bytes),
                 size: bytes.len(),
-                data: &bytes[..],
+                data: plain(&bytes[..]),
             })
             .collect();
         let Verdict::Refuted { counterexample } =
@@ -2127,6 +2211,116 @@ mod tests {
             detail(&claim(None, 2, 0), binary),
             "string 1 is not printable text"
         );
+    }
+
+    /// A snapshot nobody was watching when it was taken.
+    fn plain(bytes: &[u8]) -> Snapshot<'_> {
+        Snapshot {
+            bytes,
+            observed: BTreeMap::new(),
+        }
+    }
+
+    /// A capture of 12 bytes: hp 73 as a u32, armor 21.25 as an f32, then a signed -1
+    /// nobody watched. The human saw 73 HP, armor between 20.5 and 21.5, and 12 rounds.
+    fn live_capture() -> Result<(Vec<u8>, Vec<u8>), CheckError> {
+        let seen =
+            |name: &str, min: f64, max: f64| (name.to_owned(), ledger_core::Observed { min, max });
+        let capture = ledger_core::Capture {
+            process: "game".into(),
+            pid: 4242,
+            address: 0x7f00_1000,
+            observed: BTreeMap::from([
+                seen("hp", 73.0, 73.0),
+                seen("armor", 20.5, 21.5),
+                seen("ammo", 12.0, 12.0),
+            ]),
+        };
+        let mut memory = 73u32.to_le_bytes().to_vec();
+        memory.extend_from_slice(&21.25f32.to_le_bytes());
+        memory.extend_from_slice(&(-1i32).to_le_bytes());
+        let stored =
+            (capture.encode(&memory)).map_err(|e| CheckError::InvalidClaim(e.to_string()))?;
+        Ok((stored, memory))
+    }
+
+    #[test]
+    fn a_layout_must_read_what_was_seen_at_a_live_capture() -> Result<(), CheckError> {
+        let (stored, _) = live_capture()?;
+        let field = |name: &str, offset, len, is| ledger_core::FieldLayout {
+            name: name.into(),
+            offset,
+            len,
+            is,
+        };
+        let float = Some(FieldKind::Float {
+            min: -1000,
+            max: 1000,
+        });
+        let detail = |fields: Vec<ledger_core::FieldLayout>| {
+            let claim = ClaimKind::MemoryLayout(MemoryLayout {
+                type_name: "Player".into(),
+                size: 12,
+                fields,
+            });
+            let evidence = [(
+                EvidenceId::of(&stored),
+                EvidenceKind::LiveSnapshot,
+                &stored[..],
+            )];
+            match check_claim(
+                &ClaimId::of(b"c"),
+                &claim,
+                &evidence,
+                Duration::from_secs(5),
+            ) {
+                Ok(Verdict::Refuted { counterexample }) => counterexample.detail,
+                Ok(Verdict::Held { .. }) => "held".to_owned(),
+                other => format!("{other:?}"),
+            }
+        };
+        // The layout that is right, and one that names nothing that was seen.
+        let right = vec![field("hp", 0, 4, None), field("armor", 4, 4, float)];
+        assert_eq!(detail(right), "held");
+        assert_eq!(detail(vec![field("health", 4, 4, None)]), "held");
+        // hp placed where the armor is, and where the signed number is.
+        assert_eq!(
+            detail(vec![field("hp", 4, 4, None)]),
+            "field `hp` at +0x4 reads 1101660160, but 73 was seen when the capture was taken"
+        );
+        let signed = Some(FieldKind::Int { min: -5, max: 5 });
+        assert_eq!(
+            detail(vec![field("hp", 8, 4, signed)]),
+            "field `hp` at +0x8 reads -1, but 73 was seen when the capture was taken"
+        );
+        assert_eq!(
+            detail(vec![field("ammo", 0, 3, None)]),
+            "field `ammo` is 3 bytes, which reads as no number; 12 was seen when the capture was taken"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn other_snapshot_claims_read_the_bytes_of_a_live_capture() -> Result<(), CheckError> {
+        let (stored, memory) = live_capture()?;
+        let format = ClaimKind::Format(ledger_core::Format {
+            type_name: "Player".into(),
+            spec: serde_json::json!({"seq": [{"id": "hp", "type": "u4le", "valid": 73}]}),
+            exact: false,
+        });
+        let check = |bytes: &[u8]| {
+            let evidence = [(EvidenceId::of(bytes), EvidenceKind::LiveSnapshot, bytes)];
+            check_claim(
+                &ClaimId::of(b"f"),
+                &format,
+                &evidence,
+                Duration::from_secs(5),
+            )
+        };
+        assert!(matches!(check(&stored)?, Verdict::Held { .. }));
+        // The bytes without the line that says what they are do not count as a capture.
+        assert!(matches!(check(&memory), Err(CheckError::Malformed(..))));
+        Ok(())
     }
 
     fn format_detail(claim: &ledger_core::Format, bytes: &[u8]) -> String {
@@ -2580,7 +2774,7 @@ mod tests {
         };
         let v = MemoryLayoutChecker.check(
             &claim,
-            &[item(b"a", &[0; 8][..]), item(b"b", &[0; 4][..])],
+            &[item(b"a", plain(&[0; 8])), item(b"b", plain(&[0; 4]))],
             soon(),
         )?;
         assert!(
