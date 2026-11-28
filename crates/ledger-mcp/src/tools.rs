@@ -20,6 +20,7 @@ use ledger_core::{
 use ledger_store::{Snapshot, Store, StoreError};
 use schemars::JsonSchema;
 
+use crate::playbooks;
 use crate::runner::{self, Adapter, RIZIN};
 
 /// Rows per page of any list.
@@ -516,6 +517,9 @@ pub enum About {
     /// Which captures belong to an endpoint: needs `subject`, written as an
     /// endpoint such as `GET api.example.com/users/{id}`.
     Evidence,
+    /// Which playbooks apply to what this ledger holds; with `subject`, the text of
+    /// the playbook of that id.
+    Playbooks,
 }
 
 /// Whether a claim belongs in the list being asked for.
@@ -558,6 +562,7 @@ pub fn ask(
             Box::new(move |_, claim, _| claim.subject() == subject)
         }
         About::Evidence => return Err(needs("evidence", "subject")),
+        About::Playbooks => return Ok(stamp(&snapshot, &playbooks::answer(ledger, subject)?)),
         About::OnHold => Box::new(|_, _, status| status == Status::Blocked),
         About::Affected => {
             let id = find_claim(ledger, claim.ok_or_else(|| needs("affected", "claim"))?)?;
@@ -1550,6 +1555,37 @@ mod tests {
         assert!(!log.contains("s3cret"), "a query string was echoed");
         Ok(())
     }
+
+    #[test]
+    fn the_capture_playbook_applies_until_the_ledger_holds_a_session() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = Store::open(dir.path().join("l.db"))?;
+        let playbooks = |subject: Option<&str>| {
+            ask(&store, About::Playbooks, None, subject, None).map_err(|r| r.to_string())
+        };
+        let listed = playbooks(None)?;
+        assert!(
+            listed.contains("\ncapture-a-session  1. Capture a session: "),
+            "{listed}"
+        );
+        let text = playbooks(Some("capture-a-session"))?;
+        assert!(text.ends_with(PLAYBOOK), "{text}");
+        assert!(text.contains("You cannot run the capture"));
+        let unknown = rejected(ask(&store, About::Playbooks, None, Some("nope"), None));
+        assert!(unknown.starts_with("playbook_unknown [nope]"), "{unknown}");
+
+        let file = dir.path().join("shop.session");
+        std::fs::write(&file, SESSION)?;
+        let path = file.to_str().ok_or("path")?;
+        add_evidence(&store, EvidenceKind::Session, path).map_err(|r| r.to_string())?;
+        let listed = playbooks(None)?;
+        assert!(!listed.contains("capture-a-session"), "{listed}");
+        // Its text is still there for an agent that asks for it by name.
+        assert!(playbooks(Some("capture-a-session"))?.ends_with(PLAYBOOK));
+        Ok(())
+    }
+
+    const PLAYBOOK: &str = include_str!("../../../playbooks/web/1-capture-a-session.md");
 
     /// The inputs Rizin reads for a file given as `binary_facts`.
     fn for_rizin(

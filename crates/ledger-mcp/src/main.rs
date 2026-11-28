@@ -2,6 +2,7 @@
 //! Handlers stay thin: parse, hand the blocking work to `tools` and outside programs
 //! to `runner`, reply.
 
+mod playbooks;
 mod runner;
 mod tools;
 
@@ -37,7 +38,7 @@ struct AskArgs {
     about: About,
     /// Claim id, for about=claim and about=affected.
     claim: Option<String>,
-    /// Type name or endpoint, for about=subject.
+    /// Type name or endpoint, for about=subject; a playbook's id, for about=playbooks.
     subject: Option<String>,
     /// To continue a list: the id on the last line of the previous page.
     after: Option<String>,
@@ -128,7 +129,7 @@ impl LedgerServer {
     }
 
     #[tool(
-        description = "Ask a fixed question: all claims, one claim, a subject, what is on hold, or what a claim's failure would affect. Lists come 50 rows at a time."
+        description = "Ask a fixed question: all claims, one claim, a subject, what is on hold, what a claim's failure would affect, or which playbooks apply. Lists come 50 rows at a time."
     )]
     async fn ask(&self, Parameters(args): Parameters<AskArgs>) -> Result<String, ErrorData> {
         self.blocking("ask", move |store| {

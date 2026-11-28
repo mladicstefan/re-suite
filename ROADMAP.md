@@ -476,8 +476,9 @@ The playbooks:
       claims; a module's imports and exports as facts
 - [ ] **9. Compare two versions.** Rerun on a new session, plus which
       modules changed
-- [ ] **Playbooks reach any agent.** The server lists the playbooks that
+- [x] **Playbooks reach any agent.** The server lists the playbooks that
       apply to what the ledger holds; they are files in this repository
+      (`ask about=playbooks`, a table in `ledger-mcp` with one row per file)
 - [ ] **Trial.** One approved capture of a real site taken through every
       playbook, with the three numbers of section 11
 

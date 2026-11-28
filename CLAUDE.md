@@ -16,6 +16,7 @@ target; all checks replay captures.
 - `crates/ledger-mcp`: stdio MCP server (propose, ask, explain, add_evidence, retract). Only crate with tokio.
   Its `runner` module is the one place that starts outside programs, each found by the absolute path in `LEDGER_TOOL_<ID>`.
 - `crates/ledger-cli`: prints claims with status from a ledger file. `ledger-capture` takes what only a person may capture: `memory` of a running process, a `web` session in Chromium. Its second binary, `ledger-capture`, is how a person takes a live capture.
+- `playbooks/`: what an agent does in each situation, one file each. `ask about=playbooks` serves the ones that apply, from the table in `crates/ledger-mcp/src/playbooks.rs`.
 - `crates/ledger-bench`: `cargo run --release -p ledger-bench` checks the ROADMAP.md budgets.
 
 ## Checks

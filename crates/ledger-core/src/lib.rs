@@ -1843,6 +1843,11 @@ impl Ledger {
         self.evidence.get(id).copied()
     }
 
+    /// Every piece of evidence of one kind, in id order.
+    pub fn evidence_of(&self, kind: EvidenceKind) -> impl Iterator<Item = &EvidenceId> {
+        (self.evidence.iter()).filter_map(move |(id, stored)| (*stored == kind).then_some(id))
+    }
+
     /// The evidence a claim's checks read, check by check, oldest first.
     pub fn evidence_read(&self, id: &ClaimId) -> impl Iterator<Item = &EvidenceId> {
         let checks = self.entry(id).into_iter().flat_map(|e| &e.checks);

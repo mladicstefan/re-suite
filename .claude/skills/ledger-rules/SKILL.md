@@ -101,6 +101,13 @@ Every new `ClaimKind` variant needs all four, in the same change:
 - A real host's name is given at run time only. Tests serve their own site on
   loopback, and no file in the repository names a real target.
 
+## Playbooks
+- A playbook is a file in `playbooks/` and one row in `ledger-mcp`'s
+  `playbooks::PLAYBOOKS`: an id, a title, a function of the ledger that says
+  whether it applies, one line saying why, and the file compiled in. Adding one
+  changes nothing else.
+- Write it in short, plain sentences, and say what the agent cannot do itself.
+
 ## Compile time first
 - Prefer `const` items and `const fn` over values computed at run time, and
   over macros wherever a `const fn`, an associated const or a generic can say
