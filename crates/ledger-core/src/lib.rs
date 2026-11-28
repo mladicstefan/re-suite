@@ -9,6 +9,9 @@ use std::ops::Bound;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
+pub mod format;
+pub use format::Format;
+
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
     #[error("claim rejected: {0}")]
@@ -507,6 +510,7 @@ impl CallEdge {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClaimKind {
+    Format(Format),
     CallEdge(CallEdge),
     ResponseHeader(ResponseHeader),
     StringTable(StringTable),
@@ -543,6 +547,7 @@ impl Claim {
     #[must_use]
     pub const fn subject(&self) -> &str {
         match &self.kind {
+            ClaimKind::Format(f) => f.type_name.as_str(),
             ClaimKind::CallEdge(c) => c.binary.as_str(),
             ClaimKind::ResponseHeader(h) => h.endpoint.as_str(),
             ClaimKind::StringTable(t) => t.type_name.as_str(),
@@ -589,6 +594,7 @@ impl Claim {
     #[must_use]
     pub fn sentence(&self) -> String {
         match &self.kind {
+            ClaimKind::Format(c) => c.sentence(),
             ClaimKind::CallEdge(c) => c.sentence(),
             ClaimKind::ResponseHeader(c) => c.sentence(),
             ClaimKind::StringTable(c) => c.sentence(),
@@ -1035,6 +1041,7 @@ impl ResponseSchema {
 /// `CoreError::Inadmissible` with the reason.
 pub fn admit(claim: Claim) -> Result<WellFormed<Claim>, CoreError> {
     let admissible = match &claim.kind {
+        ClaimKind::Format(c) => c.admissible(),
         ClaimKind::CallEdge(c) => c.admissible(),
         ClaimKind::ResponseHeader(c) => c.admissible(),
         ClaimKind::StringTable(c) => c.admissible(),

@@ -1,0 +1,5 @@
+---
+source: crates/ledger-core/src/format.rs
+expression: exact.sentence()
+---
+Every `ShaderCache` parses as format description c49b3440: 5 fields in 2 types, 2 checked against fixed bytes or a rule, and ends where its top-level fields end.

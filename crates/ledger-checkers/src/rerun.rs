@@ -53,7 +53,8 @@ impl Build {
             | ClaimKind::RecordArray(_)
             | ClaimKind::FieldRelation(_)
             | ClaimKind::TaggedRecords(_)
-            | ClaimKind::StringTable(_) => {
+            | ClaimKind::StringTable(_)
+            | ClaimKind::Format(_) => {
                 let snapshots = self
                     .snapshots
                     .get(claim_subject(claim))
@@ -85,6 +86,7 @@ fn claim_subject(kind: &ClaimKind) -> &str {
         ClaimKind::FieldRelation(c) => &c.type_name,
         ClaimKind::TaggedRecords(c) => &c.type_name,
         ClaimKind::StringTable(c) => &c.type_name,
+        ClaimKind::Format(c) => &c.type_name,
         ClaimKind::CallEdge(c) => &c.binary,
         ClaimKind::RequestSignature(c) => &c.endpoint,
         ClaimKind::RequestHeader(c) => &c.endpoint,

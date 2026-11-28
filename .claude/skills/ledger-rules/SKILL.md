@@ -53,6 +53,16 @@ Every new `ClaimKind` variant needs all four, in the same change:
 4. A checker in ledger-checkers behind the `Checker` trait, wired into
    `check_claim`, with at least one test.
 
+## Format descriptions
+- A `format` claim's description is Kaitai Struct, and only part of it is read
+  (`ledger_core::format`). A key or type outside that part is refused by name at
+  admission, never skipped.
+- The checker walks the description itself (`ledger_checkers::format`). Do not
+  generate or run code for a description.
+- `tests/kaitai_oracle.rs` compares the reader with the Kaitai compiler's parser.
+  Reading more of the language means adding a case there, and bumping
+  `FormatChecker::VERSION`.
+
 ## Checkers are offline
 - Checkers replay saved evidence only. Never send anything to a live target.
 

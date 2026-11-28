@@ -1,5 +1,6 @@
 //! Offline checkers. Each replays one claim kind over saved evidence; none touches a live target.
 
+pub mod format;
 pub mod rerun;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -766,6 +767,47 @@ impl Checker<'_> for ResponseHeaderChecker {
     }
 }
 
+pub struct FormatChecker;
+
+impl<'e> Checker<'e> for FormatChecker {
+    const ID: &'static str = "format";
+    const VERSION: u32 = 1;
+    type Claim = ledger_core::Format;
+    type Evidence = &'e [u8];
+
+    fn check(
+        &self,
+        claim: &Self::Claim,
+        evidence: &[Item<&'e [u8]>],
+        deadline: Instant,
+    ) -> Result<Verdict, CheckError> {
+        let spec =
+            ledger_core::format::Spec::parse(&claim.spec).map_err(CheckError::InvalidClaim)?;
+        let too_big = AtomicBool::new(false);
+        let verdict = replay(evidence, deadline, |bytes| {
+            match format::Tree::read(&spec, bytes, claim.exact) {
+                Ok(_) => Ok(()),
+                Err(format::Failure::Wrong(detail)) => Err(detail),
+                // Nothing is known about a file that was not read to its end: it neither
+                // refutes the claim nor counts towards it.
+                Err(format::Failure::TooBig) => {
+                    too_big.store(true, Ordering::Relaxed);
+                    Ok(())
+                }
+            }
+        });
+        Ok(match verdict {
+            Verdict::Held { .. } if too_big.load(Ordering::Relaxed) => Verdict::Inconclusive {
+                reason: format!(
+                    "a file holds more than {} values under this description and was not read to its end",
+                    format::MAX_VALUES
+                ),
+            },
+            verdict => verdict,
+        })
+    }
+}
+
 pub struct CallEdgeChecker;
 
 /// What one analysis says about a claimed call.
@@ -876,7 +918,8 @@ impl Checker<'_> for CallEdgeChecker {
 
 /// Every checker with its version. A checker missing here would have its verdicts
 /// ignored once the log lists the current checkers, so `run` refuses to run one.
-pub const CHECKERS: [(&str, u32); 12] = [
+pub const CHECKERS: [(&str, u32); 13] = [
+    (FormatChecker::ID, FormatChecker::VERSION),
     (CallEdgeChecker::ID, CallEdgeChecker::VERSION),
     (ResponseHeaderChecker::ID, ResponseHeaderChecker::VERSION),
     (StringTableChecker::ID, StringTableChecker::VERSION),
@@ -896,6 +939,7 @@ pub const CHECKERS: [(&str, u32); 12] = [
 #[must_use]
 pub fn checker_of(claim: &ClaimKind) -> CheckerRef {
     let (id, version) = match claim {
+        ClaimKind::Format(_) => (FormatChecker::ID, FormatChecker::VERSION),
         ClaimKind::CallEdge(_) => (CallEdgeChecker::ID, CallEdgeChecker::VERSION),
         ClaimKind::ResponseHeader(_) => (ResponseHeaderChecker::ID, ResponseHeaderChecker::VERSION),
         ClaimKind::StringTable(_) => (StringTableChecker::ID, StringTableChecker::VERSION),
@@ -985,6 +1029,7 @@ fn scope(claim: &ClaimKind) -> Option<(&str, Scope)> {
         | ClaimKind::FieldRelation(_)
         | ClaimKind::TaggedRecords(_)
         | ClaimKind::StringTable(_)
+        | ClaimKind::Format(_)
         | ClaimKind::CallEdge(_) => None,
     }
 }
@@ -1292,6 +1337,7 @@ pub fn check_claim(
     limit: Duration,
 ) -> Result<Verdict, CheckError> {
     match claim {
+        ClaimKind::Format(c) => run(&FormatChecker, id, c, snapshots(evidence), limit),
         ClaimKind::CallEdge(c) => run(&CallEdgeChecker, id, c, facts(evidence), limit),
         ClaimKind::ResponseHeader(c) => run(
             &ResponseHeaderChecker,
@@ -2081,6 +2127,123 @@ mod tests {
             detail(&claim(None, 2, 0), binary),
             "string 1 is not printable text"
         );
+    }
+
+    fn format_detail(claim: &ledger_core::Format, bytes: &[u8]) -> String {
+        match FormatChecker.check(claim, &[item(b"e", bytes)], soon()) {
+            Ok(Verdict::Refuted { counterexample }) => counterexample.detail,
+            Ok(Verdict::Held { .. }) => "held".to_owned(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn formats_are_read_to_the_first_disagreement() {
+        let claim = |exact| ledger_core::Format {
+            type_name: "TokenTable".into(),
+            spec: serde_json::json!({
+                "meta": {"endian": "le", "encoding": "ASCII"},
+                "seq": [
+                    {"id": "magic", "contents": "JSAV"},
+                    {"id": "count", "type": "u2", "valid": {"max": 4}},
+                    {"id": "records", "type": "record", "repeat": "expr", "repeat-expr": "count"},
+                    {"id": "names", "type": "strz", "repeat": "expr", "repeat-expr": "count"}
+                ],
+                "types": {"record": {"seq": [
+                    {"id": "kind", "type": "u1", "valid": {"any-of": [1, 2]}},
+                    {"id": "len", "type": "u1"}
+                ]}}
+            }),
+            exact,
+        };
+        let detail = format_detail;
+        // The names start where the records end, which the count decides.
+        let file = b"JSAV\x02\x00\x01\x05\x02\x03alpha\0map\0";
+        assert_eq!(detail(&claim(true), file), "held");
+        assert_eq!(
+            detail(&claim(false), b"JSAW\x02\x00"),
+            "at +0x0, `magic` is 4a534157, not 4a534156"
+        );
+        assert_eq!(
+            detail(&claim(false), b"JSAV\x09\x00"),
+            "at +0x4, `count` is 9, over the most allowed, 4"
+        );
+        assert_eq!(
+            detail(&claim(false), b"JSAV\x02\x00\x01\x05\x07\x03alpha\0map\0"),
+            "at +0x8, `records[1].kind` is 7, not one of 1, 2"
+        );
+        assert_eq!(
+            detail(&claim(false), b"JSAV\x02\x00\x01\x05\x02\x03alpha\0map"),
+            "at +0x10, `names[1]` has no NUL before the end"
+        );
+        assert_eq!(
+            detail(&claim(false), b"JSAV\x02\x00\x01"),
+            "at +0x7, `records[0].len` needs 1 bytes, 0 are left"
+        );
+        assert_eq!(detail(&claim(false), b"JSAV\x00\x00more"), "held");
+        assert_eq!(
+            detail(&claim(true), b"JSAV\x00\x00more"),
+            "the top-level fields end at +0x6, the file at +0xa"
+        );
+    }
+
+    #[test]
+    fn a_check_survives_a_hostile_description_or_file() {
+        let detail = format_detail;
+        let file = b"JSAV\x02\x00\x01\x05\x02\x03alpha\0map\0";
+        // What a hostile file or description could use to crash a check is refused instead.
+        let hostile = |instances: serde_json::Value| ledger_core::Format {
+            type_name: "TokenTable".into(),
+            spec: serde_json::json!({
+                "seq": [
+                    {"id": "count", "type": "u1"},
+                    {"id": "items", "type": "item", "repeat": "expr", "repeat-expr": "count"}
+                ],
+                "instances": instances,
+                "types": {"item": {
+                    "seq": [{"id": "next", "type": "u1"}],
+                    "instances": {"depth": {
+                        "value": "next == 255 ? 0 : _parent.items[next].depth + 1"
+                    }}
+                }}
+            }),
+            exact: false,
+        };
+        // Each item names the next one, so the first rests on all the others.
+        let chain = |len: u8| {
+            let mut file = vec![len];
+            file.extend(1..len);
+            file.push(255);
+            file
+        };
+        let plain = hostile(serde_json::json!({}));
+        assert_eq!(detail(&plain, &chain(50)), "held");
+        assert_eq!(
+            detail(&plain, &chain(100)),
+            "`items[64].depth` rests on more than 64 other instances"
+        );
+        let least = "(0 - 170141183460469231731687303715884105727 - 1)";
+        let overflow = hostile(serde_json::json!({
+            "rem": {"value": format!("{least} % (0 - 1)")}
+        }));
+        assert_eq!(
+            detail(&overflow, &chain(1)),
+            "a number too large to compute with"
+        );
+
+        // A description that never moves forward is stopped, and the file then says nothing.
+        let stuck = ledger_core::Format {
+            type_name: "TokenTable".into(),
+            spec: serde_json::json!({"seq": [
+                {"id": "magic", "contents": "J"},
+                {"id": "pad", "size": 0, "repeat": "eos"}
+            ]}),
+            exact: false,
+        };
+        assert!(
+            detail(&stuck, file).starts_with("Ok(Inconclusive { reason: \"a file holds more than")
+        );
+        assert_eq!(detail(&stuck, b"J"), "held");
     }
 
     #[test]

@@ -56,7 +56,7 @@ section 9).
 | Async runtime | Tokio, in the MCP server binary only | Never in a library crate |
 | CPU-bound checks | Rayon worker pool | Outside the write path |
 | Heavy checks | Separate worker processes | May be Python where the libraries live |
-| File and protocol formats | Kaitai Struct | Phase 2 |
+| File and protocol formats | Kaitai Struct, a subset read by our own checker | No generated code runs; the Kaitai compiler is the test's second opinion |
 | Binary analysis | Rizin | Phase 2 onwards |
 | Second lifter | P-code through pypcode | Phase 5, for cross-checking |
 | Solver | Bitwuzla or Z3 | Phase 5, small scope first |
@@ -377,7 +377,10 @@ the ledger changes no status, and the write and read budgets hold.
 - [ ] **Live captures.** Snapshots of a running process, taken only with
       human approval, that carry what the human observed at capture time
       (the HUD showed 73 HP); a layout claim must decode to those values
-- [ ] **Formats.** File and protocol claims through Kaitai Struct
+- [x] **Formats.** File claims through Kaitai Struct: a `format` claim
+      carries a description, and the checker walks it over each file. It
+      places fields at offsets a count decides (`docs/trials/format-claims.md`).
+      A subset of the language; protocol messages are not tried yet
 - [x] **First binary claims.** Facts exported from Rizin; structural
       claims checked "within the recovered code", assumptions listed.
       One claim kind so far, a direct call between two functions
@@ -505,6 +508,7 @@ honestly.
 | 3, real websites (`docs/trials/real-sites.md`) | 14 of 15; the one that held is true of the captures | 2.0, about 600 tokens of tool traffic | not measured |
 | 5, the staging site (`docs/trials/staging-site.md`) | 8 of 8 | 1.36, about 120 tokens of tool traffic | none staged |
 | 6, a binary (`docs/trials/crash-handler.md`) | 3 of 3 | 1.63, about 270 tokens of tool traffic | none staged |
+| 8, format claims (`docs/trials/format-claims.md`) | 10 of 10; the ledger's count of contradicting files equals a count by hand | 2.0, about 1,500 characters of description | none staged |
 | 7, with and without the ledger (`docs/trials/ledger-loop.md`) | 0: none of 302 proposals was wrong on the evidence the ledger held | 1.0, about 310 tokens of tool traffic | 60 of 298: held on 40 files, refuted by 6,554 held out |
 
 ## 12. Not goals
@@ -522,7 +526,7 @@ honestly.
 | Does the loop cut tokens and false claims on real RE tasks? **Not when the ledger holds only what the agent has already read:** on one file-format task, three runs with the ledger and three without made 20.0 and 21.3 wrong statements for 100,000 and 106,000 tokens, and the ledger refuted nothing (`docs/trials/ledger-loop.md`). Does it when the ledger holds more evidence than the agent reads, or evidence captured later? | A second run of trial 7 with that arm |
 | A verdict lists every piece of evidence its check read: 430 KB for one check on 6,554 files, and the log is replayed at every start. Should a set of evidence be recorded once and cited by its hash? | Before a ledger holds thousands of captures of one kind |
 | A snapshot claim must list its evidence ids; a web claim can say `all_captures`. What selects "every snapshot of this type"? | Phase 2, formats |
-| No snapshot claim kind can place a field at an offset that depends on a count, so six agents out of six left out everything after the first variable-length table of a format. Does Kaitai Struct close this? | Phase 2, formats |
+| A `format` claim places fields at offsets a count decides (`docs/trials/format-claims.md`), in a subset of Kaitai Struct: no enums, parameters, `process`, bit fields. Which of these do agents reach for, and does an agent with format claims get past the first table where six without them did not? | A second run of trial 7 with format claims |
 | A rerun ties a web claim to its endpoint and a snapshot claim to its type name, and suggests a move from a bounded search (`docs/trials/version-rerun.md`). That was tried on a simulated pair of builds only. Which anchor survives real version changes with the fewest false matches? | The first real pair of target versions |
 | RzIL and P-code agree on the effects of every AArch64 instruction both lift, and differ on 0.06% to 0.49% of x86-64 ones once the auxiliary carry flag is set aside (`docs/trials/rzil-coverage.md`). That compares which registers and memory are written, not the values. How often do the values differ? | Phase 5, concrete execution |
 | What evidence is enough for "held on N runs", and how should it be worded so it is not read as "proved"? | Proof gate, design brief |

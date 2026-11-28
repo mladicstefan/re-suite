@@ -1,0 +1,26 @@
+6594 files, 105173633 bytes
+by hand: the guess is contradicted by 3943 files, the truth by 0
+loaded as evidence in 53 s
+
+## the guess, 0.2 s for the call
+seq 6597
+refuted      6d718af36613  Every `ShaderCache` parses as format description cd4f8400: 12 fields in 2 types, 3 checked against fixed bytes or a rule.
+refuted by b3dcbdb5406f: at +0x2824, `zero` is 1162690883, not 0 (3943 of 6594 captures disagree; this is the smallest)
+
+## the truth, 0.2 s for the call
+seq 6599
+held         6bb343eb816d  Every `ShaderCache` parses as format description dbe97414: 12 fields in 2 types, 7 checked against fixed bytes or a rule.
+replaces refuted 6d718af36613; weaker in: /spec/instances dropped; /spec/seq/2/size dropped; /spec/seq/3/repeat dropped; and 3 more; also changed: /spec/seq/1/valid added; /spec/seq/2/id was "tables", now "uniform_count_2"; /spec/seq/2/type added; and 11 more
+
+## the truth with one thing changed
+records of 212 bytes: refuted      d228e6f73420  Every `ShaderCache` parses as format description 1f3c6681: 12 fields in 2 types, 7 checked against fixed bytes or a rule. | refuted by b3dcbdb5406f: at +0x19c8, `uniforms[1].name_len` is 0, under the least allowed, 1 (6594 of 6594 captures disagree; this is the smallest) | replaces refuted 6d718af36613; weaker in: /spec/instances dropped; /spec/seq/2/size dropped; /spec/seq/3/repeat dropped; and 3 more; also changed: /spec/seq/1/valid added; /spec/seq/2/id was "tables", now "uniform_count_2"; /spec/
+at most 30 uniforms: refuted      73a6fbdbf971  Every `ShaderCache` parses as format description 490e684f: 12 fields in 2 types, 7 checked against fixed bytes or a rule. | refuted by 3d1aa61a2dc7: at +0xbc, `uniform_count` is 31, over the most allowed, 30 (191 of 6594 captures disagree; this is the smallest) | replaces refuted d228e6f73420; changed: /spec/seq/1/valid/max was 1024, now 30; /spec/types/uniform/seq/2/size was 204, now 208
+at most 8 samplers: refuted      8edb448a8a46  Every `ShaderCache` parses as format description 2049a6c4: 12 fields in 2 types, 7 checked against fixed bytes or a rule. | refuted by a553ec0d01f6: at +0xc8, `sampler_count` is 9, over the most allowed, 8 (115 of 6594 captures disagree; this is the smallest) | replaces refuted d228e6f73420; changed: /spec/seq/4/valid/max was 64, now 8; /spec/types/uniform/seq/2/size was 204, now 208
+big-endian numbers: refuted      7a3d329db973  Every `ShaderCache` parses as format description a9b6cb44: 12 fields in 2 types, 7 checked against fixed bytes or a rule. | refuted by b3dcbdb5406f: at +0xbc, `uniform_count` is 301989888, over the most allowed, 1024 (6594 of 6594 captures disagree; this is the smallest) | replaces refuted d228e6f73420; changed: /spec/meta/endian was "le", now "be"; /spec/types/uniform/seq/2/size was 204, now 208
+slots count from 1: refuted      7804aec96ac7  Every `ShaderCache` parses as format description 59616bb1: 12 fields in 2 types, 7 checked against fixed bytes or a rule. | refuted by ac38a54456d8: at +0x28fc, `sampler_slots[0]` is 0, against its `valid` expression (4598 of 6594 captures disagree; this is the smallest) | replaces refuted d228e6f73420; changed: /spec/seq/7/valid/expr was "_ == _index", now "_ == _index + 1"; /spec/types/uniform/seq/2/size was 204, now 208
+sampler indexes under 10: refuted      1334465cca9f  Every `ShaderCache` parses as format description 09a5438f: 12 fields in 2 types, 7 checked against fixed bytes or a rule. | refuted by ac38a54456d8: at +0x2900, `sampler_uniforms[0]` is 18, against its `valid` expression (4515 of 6594 captures disagree; this is the smallest) | replaces refuted d228e6f73420; changed: /spec/seq/8/valid/expr was "_ < uniform_count", now "_ < 10"; /spec/types/uniform/seq/2/size was 204, now 208
+names of at most 12 characters: refuted      8fcce903689e  Every `ShaderCache` parses as format description 8a5b00f3: 12 fields in 2 types, 7 checked against fixed bytes or a rule. | refuted by b3dcbdb5406f: at +0x18f4, `uniforms[0].name_len` is 13, over the most allowed, 12 (6594 of 6594 captures disagree; this is the smallest) | replaces refuted d228e6f73420; changed: /spec/types/uniform/seq/0/valid/max was 255, now 12; /spec/types/uniform/seq/2/size was 204, now 208
+the second count is twice the first: refuted      d3f9991a0855  Every `ShaderCache` parses as format description 910e85d2: 12 fields in 2 types, 7 checked against fixed bytes or a rule. | refuted by b3dcbdb5406f: at +0xc0, `uniform_count_2` is 18, against its `valid` expression (6594 of 6594 captures disagree; this is the smallest) | replaces refuted d228e6f73420; changed: /spec/seq/2/valid/expr was "_ == uniform_count", now "_ == uniform_count * 2"; /spec/types/uniform/seq/2/size was 204, now 208
+the file ends after the two tables: refuted      201680f8e25c  Every `ShaderCache` parses as format description dbe97414: 12 fields in 2 types, 7 checked against fixed bytes or a rule, and ends where its top-level fields en… | refuted by b3dcbdb5406f: the top-level fields end at +0x2824, the file at +0x2c6d (6594 of 6594 captures disagree; this is the smallest) | replaces refuted d228e6f73420; changed: /exact was false, now true; /spec/types/uniform/seq/2/size was 204, now 208
+
+caught 9 of 9 changed descriptions
