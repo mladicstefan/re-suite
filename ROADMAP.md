@@ -62,7 +62,7 @@ section 9).
 | Web capture | Chromium over the DevTools Protocol; mitmproxy for other clients | Only for a person at a terminal who approves the hosts |
 | Minified JavaScript | Source maps, Wakaru, webcrack | Phase 2W |
 | Technology fingerprints | Wappalyzer rules on saved captures; retire.js on script contents | Phase 2W |
-| Searching code | ast-grep, jsluice | Phase 2W |
+| Searching code | ast-grep | Phase 2W |
 | Second lifter | P-code through pypcode | Phase 5, for cross-checking |
 | Solver | Bitwuzla or Z3 | Phase 5, small scope first |
 | Proof certificates | Lean 4, bit-level lemmas only | Phase 6, optional |
@@ -434,10 +434,11 @@ Two pieces every playbook stands on:
       prints is stored as evidence, and the log records which tool, at
       which version, read which inputs. Checkers stay in-process and
       pure. Rizin moves into this
-- [ ] **Every tool is pinned.** Nix for programs, a lockfile for npm
-      packages: Wakaru, webcrack, retire.js, ast-grep, jsluice, mitmproxy,
-      wabt, wasm-tools, prettier, and a Wappalyzer rule engine that runs
-      on saved captures
+- [x] **Every tool is pinned.** Nix for programs, a lockfile for npm
+      packages: Wakaru, webcrack, retire.js, ast-grep, mitmproxy, wabt,
+      wasm-tools, prettier, and a Wappalyzer rule engine that runs on
+      saved captures. Each was tried on real input
+      (`docs/trials/web-tools.md`); jsluice was dropped after that
 
 The playbooks:
 

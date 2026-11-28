@@ -45,6 +45,24 @@
               cargoHash = "sha256-vAG2+4tiwKLO5lHRihIYYrPtW1OPEDUijVPs1WeM7ps=";
             }
           );
+          # Wakaru, webcrack and retire.js at the versions in tools/js/package-lock.json.
+          jsModules = pkgs.importNpmLock.buildNodeModules {
+            npmRoot = ./tools/js;
+            inherit (pkgs) nodejs;
+          };
+          jsTools = pkgs.runCommand "re-suite-js-tools" { } ''
+            mkdir -p $out/bin
+            for tool in wakaru webcrack retire; do
+              ln -s ${jsModules}/node_modules/.bin/$tool $out/bin/$tool
+            done
+          '';
+          # The Wappalyzer rule set (wappalyzergo, pinned by go.sum) on saved responses.
+          fingerprint = pkgs.buildGoModule {
+            pname = "ledger-fingerprint";
+            version = "0";
+            src = ./tools/fingerprint;
+            vendorHash = "sha256-8qKM7GnfBtwkTaOSBFWeIC7tCG1NF153xvYCjb6WoyU=";
+          };
         in
         pkgs.mkShell {
           packages = [
@@ -63,6 +81,14 @@
             # docs/trials/real-sites.capture.mjs
             pkgs.nodejs
             pkgs.chromium
+            # What the web playbooks run on captured traffic and scripts.
+            jsTools
+            fingerprint
+            pkgs.ast-grep
+            pkgs.mitmproxy
+            pkgs.prettier
+            pkgs.wabt
+            pkgs.wasm-tools
           ];
         };
     in

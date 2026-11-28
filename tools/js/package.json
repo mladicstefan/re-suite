@@ -1,0 +1,10 @@
+{
+  "name": "re-suite-js-tools",
+  "private": true,
+  "description": "JavaScript tools the ledger runs on captured scripts, pinned by package-lock.json",
+  "dependencies": {
+    "@wakaru/cli": "1.17.0",
+    "retire": "6.1.2",
+    "webcrack": "2.16.0"
+  }
+}

@@ -20,6 +20,8 @@ target; all checks replay captures.
 ## Checks
 - Tools: `flake.nix` pins every outside tool (Rust, cargo tools, Rizin, Kaitai compiler, gdb, uv, llvm, Node, Chromium).
   Run anything that needs one with `nix develop -c <command>`. Never install a tool on the machine; add it to the flake.
+  npm tools are pinned in `tools/js`: add one with `npm install --package-lock-only --save-exact --ignore-scripts <name>` there.
+  `tools/fingerprint` is a Go wrapper; after changing its dependencies, refresh `vendorHash` in the flake.
 - Full CI: `scripts/ci.sh` (fmt, clippy -D warnings, clippy of ledger-os for Windows and macOS, nextest, doctests, cargo deny, cargo machete, uv lock check).
   It enters the flake's shell itself.
 - Hooks in `.claude/settings.json` run `cargo check -p <crate>` after `.rs` edits and

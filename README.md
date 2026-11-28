@@ -92,7 +92,9 @@ From `cargo tree -p <crate> --depth 1`:
 
 The only thing to install is [Nix](https://nixos.org/download) with flakes turned on. `flake.nix` and
 `flake.lock` pin every tool: the Rust toolchain, the cargo tools CI uses, Rizin, the Kaitai Struct compiler,
-gdb, uv, llvm, Node and Chromium. `uv.lock` pins the Python packages. Linux only so far.
+gdb, uv, llvm, Node and Chromium, and the web tools: Wakaru, webcrack and retire.js (versions in
+`tools/js/package-lock.json`), ast-grep, mitmproxy, prettier, wabt, wasm-tools, and `ledger-fingerprint`, the
+Wappalyzer rule set on saved responses (`tools/fingerprint`). `uv.lock` pins the Python packages. Linux only so far.
 
 ```bash
 nix develop                            # a shell with all of the tools; the commands below run inside it
