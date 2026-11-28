@@ -1,10 +1,24 @@
-# re-suite: replay ledger
+# re-suite
 
-Backend of an agent-first reverse-engineering workbench. Agents file findings as
-typed, machine-checkable claims; each claim is re-checked offline against saved
-evidence (memory snapshots, captured requests and exchanges) and shown to a human
-as a plain sentence with a status, plus a counterexample when it fails. Nothing is
-ever sent to a live target.
+An agent-first reverse-engineering workbench. AI agents do the analysis; a person
+approves what touches a live target and reviews the findings.
+
+Its core is a **replay ledger**. An agent cannot record a finding as free text. It
+files a typed claim, the ledger re-checks the claim offline against saved evidence
+(captured web traffic, scripts, memory snapshots, what a tool recovered from a
+program), and the person sees one plain sentence with a status, plus the case that
+contradicts it when it fails. Checks never contact the target.
+
+## Where it stands
+
+| | |
+| :- | :- |
+| **Works today** | The ledger: thirteen claim kinds, an MCP server with five verbs, an append-only log, reruns on a new build of the target. Web claims on captured traffic. Every outside tool pinned. |
+| **Being built** | Web reverse engineering end to end, as nine playbooks (below). This comes first. |
+| **Paused (TODO)** | Binaries, file formats and live memory. What exists stays and is tested: call edges through Rizin, format claims, `ledger-capture`. |
+| **After web works** | The read model for a person reviewing findings, then the desktop interface. |
+
+`ROADMAP.md` has the plan, the rules that do not change, and a checkbox for each piece.
 
 ## How it works
 
@@ -39,6 +53,33 @@ verdict  held on 6 captures
 
 "Held on 6" means six captures did not contradict the claim. It is not proof.
 
+## Web playbooks
+
+A playbook is one situation an agent meets: what to run, on what, and which claims
+the work ends in. The tools are existing ones, pinned, and run on saved evidence.
+Only the first playbook touches the target, and only a person can start it.
+
+| # | Playbook | Tools | Ends in |
+| :- | :- | :- | :- |
+| 1 | Capture a session. A person at a terminal approves the hosts | Chromium over the DevTools Protocol; mitmproxy for clients that are not browsers | a session: exchanges in order, the script and line that started each, every script's source |
+| 2 | Fingerprint the stack: frameworks, servers, CDNs, bot walls, libraries | Wappalyzer rules on saved responses (`ledger-fingerprint`); retire.js | a `uses_technology` claim, and the choice of the next playbook. A bot wall stops the agent |
+| 3 | Recover source from minified JavaScript | a captured source map; otherwise Wakaru, then webcrack for obfuscated code | readable modules as derived evidence |
+| 4 | Find the API in the code | ast-grep | endpoints the scripts name that no capture shows |
+| 5 | Map the API from traffic | the ledger | schema, status and header claims; an OpenAPI export of what holds |
+| 6 | Trace a request to the code that sends it | the session, then playbook 3 | where an endpoint's requests start; signing keys as secret evidence |
+| 7 | Sessions and login | the ordered session | flow claims: this token came from that response |
+| 8 | GraphQL, WebSocket, WebAssembly | captures; wabt, wasm-tools | operation and frame claims |
+| 9 | Compare two versions | a second session | what holds, moved or failed; which modules changed |
+
+Three rules hold in every playbook. Static analysis comes first, and a new capture
+is asked for only when saved evidence cannot answer. Recovered code and names are
+the agent's reading until a claim about them holds. A tool's output is stored as
+evidence, with the tool, its version and its inputs on record.
+
+Most of this is not built yet. What is: the ledger, the web claim kinds, the pinned
+tools, and the runner that stores a tool's output as evidence. What each tool did on
+a real minified bundle is in `docs/trials/web-tools.md`.
+
 ## Claim kinds
 
 A claim is one of thirteen typed statements. Each has an admission rule, a sentence, and a
@@ -61,6 +102,23 @@ checker that replays it on saved evidence.
 | `call_edge` | one function calls another directly, within the code a tool recovered | what Rizin recovers from a program |
 
 Toolchain: Rust 1.100.0 (pinned in `rust-toolchain.toml`), edition 2024, resolver 3.
+
+## What has been measured
+
+Each trial is a write-up with its numbers, its method and what it found wrong.
+
+| Trial | Result |
+| :- | :- |
+| [Half-Life saves](docs/trials/half-life-saves.md) | 20 of 21 deliberately wrong claims caught |
+| [Web traffic](docs/trials/web-api.md) | 19 of 19 caught |
+| [Real websites](docs/trials/real-sites.md) | 14 of 15 caught; the one that held is true of the captures |
+| [A staging site](docs/trials/staging-site.md) | 8 of 8 caught; the browser's cache had dropped a header from the capture |
+| [A binary](docs/trials/crash-handler.md) | 3 of 3 caught |
+| [With and without the ledger](docs/trials/ledger-loop.md) | no difference when the ledger holds only what the agent has read; 60 of 298 claims that held on 40 files failed on 6,554 held out |
+| [Format claims](docs/trials/format-claims.md) | 10 of 10 caught; the ledger's count of contradicting files equals a count by hand |
+| [Version reruns](docs/trials/version-rerun.md) | holds, moved and failed on a simulated pair of builds |
+| [Rizin's recovery and lifting](docs/trials/rzil-coverage.md) | 96% to 98% of instructions lifted, 55% to 80% of functions in full |
+| [The web tools](docs/trials/web-tools.md) | Wakaru split a 640 KB minified bundle into 105 modules in 2.5 s |
 
 ## Crates
 
